@@ -1,0 +1,45 @@
+{
+  "title": "Kanban Board",
+  "subtitle": "Kanban view of all agents by status",
+  "subtitleSessions": "Kanban view of all sessions by status",
+  "viewToggle": {
+    "agents": "Agents",
+    "sessions": "Sessions"
+  },
+  "noAgents": "No agents tracked yet",
+  "noAgentsDesc": "Start a monitored agent session with hooks installed to see agents appear here.",
+  "agentCount_one": "{{count}} agent tracked",
+  "agentCount_other": "{{count}} agents tracked",
+  "noAgentsInColumn": "No agents",
+  "noSessions": "No sessions tracked yet",
+  "noSessionsDesc": "Start a monitored agent session with hooks installed to see sessions appear here.",
+  "sessionCount_one": "{{count}} session tracked",
+  "sessionCount_other": "{{count}} sessions tracked",
+  "noSessionsInColumn": "No sessions",
+  "ran": "ran ",
+  "running": "running ",
+  "session": {
+    "anonymous": "Untitled session",
+    "agentSummary_one": "{{count}} agent",
+    "agentSummary_other": "{{count}} agents",
+    "subagentSummary_one": "{{count}} subagent",
+    "subagentSummary_other": "{{count}} subagents",
+    "turnSummary_one": "{{count}} turn",
+    "turnSummary_other": "{{count}} turns"
+  },
+  "tooltip": {
+    "agent": {
+      "working": "Agent is actively processing work right now.\n\nIt moves back to Waiting when this turn ends.",
+      "waiting": "Agent finished its turn or needs a human response, such as permission approval.\n\nIt returns to work when the session continues.",
+      "completed": "Agent has fully ended for this session.\n\nNo further activity will be recorded against this agent.",
+      "error": "Agent recorded an error and will not continue until the session is resumed or retried."
+    },
+    "session": {
+      "active": "Session is mid-turn — an agent is currently working and the user is not blocking anything. This state is brief: the session returns to Waiting when the turn ends.",
+      "waiting": "Session is waiting on you. A turn may have completed, or the agent may need permission or input.\n\nLook here for sessions you owe a reply to.",
+      "completed": "Session has fully closed because its CLI exited cleanly or it was explicitly closed.\n\nAll agents on this session are also completed.",
+      "error": "Session ended with an error — an unrecoverable failure or an upstream API error terminated the run.",
+      "abandoned": "Session went stale without a clean exit signal. Marked abandoned after 5+ minutes of no activity (for example after /resume, a network drop, or a killed CLI). Distinct from Completed: no real exit was observed."
+    }
+  }
+}

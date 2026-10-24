@@ -1,0 +1,206 @@
+/**
+ * @file webhook-tools.ts
+ * @description MCP tools for provider discovery, redacted webhook target
+ * management, test delivery, and delivery-log inspection.
+ * @author Son Nguyen <hoangson091104@gmail.com>
+ */
+/* =============================================================================
+ * MODULE_GUIDE — extended in-file reference (comments only; safe to read, never executed)
+ * =============================================================================
+ * **Path:** `mcp/src/tools/domains/webhook-tools.ts`
+ * **Purpose:** Registers MCP webhook tools for provider discovery, redacted target management, test delivery, and delivery-log inspection.
+ *
+ * ## Design constraints
+ * - Local-first: no telemetry leaves the machine unless the user configures webhooks.
+ * - Fail-safe hooks path on the server must never block Claude Code; UI mirrors that
+ *   philosophy by degrading gracefully (empty states, stale badges, reconnect loops).
+ * - Destructive flows stay behind explicit confirmation modals and server-side gates.
+ * - Internationalization: user-visible strings belong in i18n JSON, not literals here.
+ *
+ * ## Remote data & SSH
+ * Remote Data Sources let operators aggregate multiple machines. SSH entries describe
+ * how to reach a peer dashboard; the global data scope (`dataScope.ts`) narrows every
+ * scoped GET via `?sources=`. Health checks and import history surface in Settings.
+ *
+ * ## Observability
+ * Prometheus scrapes `GET /api/metrics` (see `monitoring/`). Grafana ships four
+ * provisioned boards (overview, sessions, tools, alerts). Native npm scripts and
+ * Docker Compose profiles are documented in `monitoring/README.md`.
+ *
+ * ## Internal dependencies
+ * - `../../core/tool-registry.js`
+ * - `../../policy/tool-guards.js`
+ * - `../schemas.js`
+ * - `../../types/tool-context.js`
+ *
+ * ## Public surface
+ * - `registerWebhookTools` — exported API; see TSDoc on the symbol for behavior.
+ *
+ * ## Testing pointers
+ * - Prefer colocated `__tests__` with Vitest + Testing Library for UI.
+ * - Server contract changes require `npm run test:server` and OpenAPI sync.
+ * - MCP edits: `npm run mcp:typecheck` and `npm run mcp:build`.
+ *
+ * ## Related docs
+ * - `ARCHITECTURE.md` — hooks → API → SQLite → WebSocket → UI pipeline.
+ * - `docs/API.md` — REST reference.
+ * - `.claude/skills/file-headers/` — mandatory `@author` header policy.
+ * ============================================================================= */
+/* -----------------------------------------------------------------------------
+ * EXPORT CATALOG — quick index of symbols defined below (documentation only).
+ * -----------------------------------------------------------------------------
+ * **registerWebhookTools**
+ *   Part of this module's public contract. Downstream imports should treat
+ *   the signature and return type as stable unless release notes say otherwise.
+ *   When behavior changes, update the `@file` overview and relevant tests.
+ *
+ * ----------------------------------------------------------------------------- */
+
+import { z } from "zod";
+import { registrarFor } from "../../core/tool-registry.js";
+import { assertMutationsEnabled } from "../../policy/tool-guards.js";
+import { JsonObjectSchema } from "../schemas.js";
+import type { ToolContext } from "../../types/tool-context.js";
+
+/** Webhook provider types the tools accept. */
+const WebhookTypeSchema = z.enum([
+  "slack",
+  "discord",
+  "teams",
+  "google_chat",
+  "mattermost",
+  "rocketchat",
+  "telegram",
+  "pagerduty",
+  "opsgenie",
+  "splunk_oncall",
+  "zapier",
+  "make",
+  "n8n",
+  "pipedream",
+  "generic",
+]);
+
+/** String-to-string map, for headers and provider settings. */
+const StringMapSchema = z.record(z.string());
+
+/**
+ * Register the webhook tools: list providers, targets, and deliveries, and create, update, delete,
+ * and test targets. Tools that change data check that mutations are enabled
+ * (`MCP_DASHBOARD_ALLOW_MUTATIONS`) before calling the dashboard.
+ *
+ * @param context - Shared tool context.
+ */
+export function registerWebhookTools(context: ToolContext): void {
+  const { api, config } = context;
+  const register = registrarFor(context);
+
+  register(
+    "dashboard_list_webhook_providers",
+    "List supported webhook providers and their public configuration fields.",
+    {},
+    async () => api.get("/api/webhooks/providers")
+  );
+  register(
+    "dashboard_list_webhooks",
+    "List configured webhook targets with secrets redacted.",
+    {},
+    async () => api.get("/api/webhooks")
+  );
+
+  register(
+    "dashboard_list_webhook_deliveries",
+    "List recent delivery attempts for one webhook target.",
+    {
+      webhook_id: z.string().min(1).max(256),
+      limit: z.number().int().min(1).max(200).optional(),
+      offset: z.number().int().min(0).max(100_000).optional(),
+    },
+    async (args) =>
+      api.get(`/api/webhooks/${encodeURIComponent(args.webhook_id as string)}/deliveries`, {
+        query: {
+          limit: (args.limit as number | undefined) ?? 20,
+          offset: (args.offset as number | undefined) ?? 0,
+        },
+      })
+  );
+
+  register(
+    "dashboard_create_webhook",
+    "Create a webhook target. Provider secrets are accepted only by the dashboard and never returned.",
+    {
+      name: z.string().min(1).max(256),
+      type: WebhookTypeSchema,
+      url: z.string().url().optional(),
+      enabled: z.boolean().optional(),
+      secret: z.string().max(8192).optional(),
+      headers: StringMapSchema.optional(),
+      rule_ids: z.array(z.string().min(1).max(256)).max(500).optional(),
+      webhook_config: JsonObjectSchema.optional(),
+    },
+    async (args) => {
+      assertMutationsEnabled(config);
+      return api.post("/api/webhooks", {
+        body: {
+          name: args.name,
+          type: args.type,
+          url: args.url,
+          enabled: args.enabled,
+          secret: args.secret,
+          headers: args.headers,
+          rule_ids: args.rule_ids,
+          config: args.webhook_config,
+        },
+      });
+    }
+  );
+
+  register(
+    "dashboard_update_webhook",
+    "Update one webhook target. Omitted secret-bearing fields remain unchanged.",
+    {
+      webhook_id: z.string().min(1).max(256),
+      name: z.string().min(1).max(256).optional(),
+      url: z.string().url().optional(),
+      enabled: z.boolean().optional(),
+      secret: z.string().max(8192).nullable().optional(),
+      headers: StringMapSchema.nullable().optional(),
+      rule_ids: z.array(z.string().min(1).max(256)).max(500).nullable().optional(),
+      webhook_config: JsonObjectSchema.nullable().optional(),
+    },
+    async (args) => {
+      assertMutationsEnabled(config);
+      return api.patch(`/api/webhooks/${encodeURIComponent(args.webhook_id as string)}`, {
+        body: {
+          name: args.name,
+          url: args.url,
+          enabled: args.enabled,
+          secret: args.secret,
+          headers: args.headers,
+          rule_ids: args.rule_ids,
+          config: args.webhook_config,
+        },
+      });
+    }
+  );
+
+  register(
+    "dashboard_delete_webhook",
+    "Delete one webhook target and its delivery history.",
+    { webhook_id: z.string().min(1).max(256) },
+    async (args) => {
+      assertMutationsEnabled(config);
+      return api.delete(`/api/webhooks/${encodeURIComponent(args.webhook_id as string)}`);
+    }
+  );
+
+  register(
+    "dashboard_test_webhook",
+    "Send one synthetic alert to a configured webhook target. This has an external side effect.",
+    { webhook_id: z.string().min(1).max(256) },
+    async (args) => {
+      assertMutationsEnabled(config);
+      return api.post(`/api/webhooks/${encodeURIComponent(args.webhook_id as string)}/test`);
+    }
+  );
+}

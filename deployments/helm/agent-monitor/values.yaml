@@ -1,0 +1,207 @@
+# CCAM Helm values. The bundled SQLite backend is a single-writer database.
+# The chart intentionally rejects replicaCount != 1 and autoscaling.enabled=true.
+replicaCount: 1
+
+image:
+  registry: ""
+  repository: ccam-dashboard
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 4820
+  nodePort: ""
+  annotations: {}
+
+# The chart supports standard Ingress and Gateway API HTTPRoute. Enable one.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: agent-monitor.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+gatewayAPI:
+  enabled: false
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+      sectionName: https
+  hostnames:
+    - agent-monitor.local
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Kept only to produce a clear schema error for stale values files.
+autoscaling:
+  enabled: false
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes: ["ReadWriteOnce"]
+  size: 10Gi
+  annotations: {}
+  existingClaim: ""
+  retain: true
+
+# Create this Secret outside Helm for production, preferably with External
+# Secrets Operator or your cloud secret controller. Required keys are
+# dashboard-token, hook-token, and mcp-token.
+secrets:
+  existingSecret: agent-monitor-secrets
+  create: false
+  dashboardToken: ""
+  hookToken: ""
+  mcpToken: ""
+
+ssh:
+  existingSecret: ""
+  mountPath: /home/node/.ssh
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+config:
+  NODE_ENV: production
+  DASHBOARD_HOST: "0.0.0.0"
+  DASHBOARD_PORT: "4820"
+  DASHBOARD_DATA_DIR: /app/data
+  DASHBOARD_ENV_PATH: /app/data/config/.env
+  CLAUDE_HOME: /app/data/claude
+  DASHBOARD_CODEX_HOME: /app/data/codex
+  DASHBOARD_LIVENESS_PROBE: "0"
+  DASHBOARD_ALLOWED_HOSTS: ""
+
+extraEnv: {}
+extraEnvFrom: []
+
+startupProbe:
+  httpGet:
+    path: /api/health
+    port: http
+    httpHeaders:
+      - name: Host
+        value: localhost
+  periodSeconds: 2
+  failureThreshold: 30
+
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+    httpHeaders:
+      - name: Host
+        value: localhost
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+    httpHeaders:
+      - name: Host
+        value: localhost
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    matchLabels:
+      ccam.dev/dashboard-client: "true"
+  additionalIngressRules: []
+  additionalEgressRules: []
+
+mcp:
+  enabled: false
+  image:
+    registry: ""
+    repository: ccam-mcp
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 8819
+  exposeService: false
+  service:
+    annotations: {}
+  allowedNamespaceSelector:
+    matchLabels:
+      ccam.dev/mcp-client: "true"
+  allowMutations: false
+  allowDestructive: false
+  logLevel: info
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: false

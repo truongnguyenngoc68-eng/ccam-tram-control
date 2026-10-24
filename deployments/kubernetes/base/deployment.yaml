@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-monitor
+  namespace: agent-monitor
+  labels:
+    app.kubernetes.io/name: agent-monitor
+    app.kubernetes.io/instance: agent-monitor
+    app.kubernetes.io/version: "2.4.3"
+    app.kubernetes.io/component: server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # CCAM uses one SQLite database. Run exactly one active dashboard writer per
+  # PVC. Recreate ensures upgrades never overlap old and new writers.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-monitor
+      app.kubernetes.io/instance: agent-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-monitor
+        app.kubernetes.io/instance: agent-monitor
+        app.kubernetes.io/version: "2.4.3"
+        app.kubernetes.io/component: server
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: agent-monitor
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: agent-monitor
+          image: ccam-dashboard:2.4.3
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 4820
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: agent-monitor-config
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DASHBOARD_TOKEN_FILE
+              value: /run/ccam-secrets/dashboard-token
+            - name: DASHBOARD_HOOK_TOKEN_FILE
+              value: /run/ccam-secrets/hook-token
+
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            failureThreshold: 30
+            periodSeconds: 2
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: secrets
+              mountPath: /run/ccam-secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+          lifecycle:
+            preStop:
+              exec:
+                # Allow in-flight requests to drain before SIGTERM
+                command: ["sh", "-c", "sleep 5"]
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-monitor-data
+        - name: secrets
+          secret:
+            secretName: agent-monitor-secrets
+            defaultMode: 0400
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi

@@ -1,0 +1,10 @@
+{
+  "title": "活动流",
+  "subtitle": "所有Agent事件的实时流",
+  "paused": "（已暂停 - 缓冲 {{count}} 条）",
+  "resume": "继续",
+  "pause": "暂停",
+  "noActivity": "暂无活动",
+  "noActivityDesc": "Agent 会话工作时，事件会实时显示在这里。",
+  "viewSession": "会话"
+}

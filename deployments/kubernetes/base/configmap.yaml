@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-monitor-config
+  namespace: agent-monitor
+  labels:
+    app.kubernetes.io/name: agent-monitor
+    app.kubernetes.io/instance: agent-monitor
+    app.kubernetes.io/version: "2.4.3"
+    app.kubernetes.io/component: config
+    app.kubernetes.io/managed-by: kustomize
+data:
+  NODE_ENV: "production"
+  DASHBOARD_HOST: "0.0.0.0"
+  DASHBOARD_PORT: "4820"
+  DASHBOARD_DATA_DIR: "/app/data"
+  DASHBOARD_ENV_PATH: "/app/data/config/.env"
+  CLAUDE_HOME: "/app/data/claude"
+  DASHBOARD_CODEX_HOME: "/app/data/codex"
+  DASHBOARD_LIVENESS_PROBE: "0"
+  DASHBOARD_ALLOWED_HOSTS: "agent-monitor,agent-monitor.example.com"

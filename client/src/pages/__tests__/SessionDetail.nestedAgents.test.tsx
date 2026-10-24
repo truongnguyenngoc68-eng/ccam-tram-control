@@ -1,0 +1,497 @@
+/**
+ * @file SessionDetail.nestedAgents.test.tsx
+ * @description Tests for SessionDetail page focusing on correct rendering of nested agent hierarchies, including edge cases like orphaned subagents and multiple main agents. Validates expand/collapse behavior and descendant counts in the UI.
+ * @author Son Nguyen <hoangson091104@gmail.com>
+ */
+/* =============================================================================
+ * TEST_CONTRACT_GUIDE — executable-specification map (documentation only)
+ * =============================================================================
+ * Path: `client/src/pages/__tests__/SessionDetail.nestedAgents.test.tsx`
+ *
+ * Scope
+ * Tests for SessionDetail page focusing on correct rendering of nested agent hierarchies, including
+ * edge cases like orphaned subagents and multiple main agents. Validates expand/collapse behavior
+ * and descendant counts in the UI.
+ *
+ * Subjects and collaborators
+ * - `../SessionDetail` — local module imported by this suite.
+ * - `../../lib/types` — local module imported by this suite.
+ * - `../../lib/format` — local module imported by this suite.
+ *
+ * Harness and isolation
+ * - Vitest supplies suite lifecycle, spies, mocks, and assertions; every case must be
+ *   order-independent.
+ * - React Testing Library drives the rendered UI through accessible roles, labels, and user-visible
+ *   text.
+ * - `MemoryRouter` provides deterministic navigation without coupling the suite to browser history.
+ * - Realtime inputs are simulated locally so connection timing and event ordering stay reproducible.
+ * - Mock boundary: `../../lib/api`.
+ * - Mock boundary: `../../lib/eventBus`.
+ *
+ * Suite groups
+ * - `SessionDetail - Nested Agent Tree Rendering`
+ *
+ * Protected behavior
+ * - shows the session total cost on the main agent card (cost is loaded separately)
+ * - does not reload session details for another session's task event
+ * - renders a flat main → subagent hierarchy (depth 1)
+ * - renders deeply nested agents (depth 3: main → L1 → L2 → L3)
+ * - shows descendant count in collapsed badge for nested agents
+ * - expands and collapses nested agent groups
+ * - renders orphaned subagents in dedicated section
+ * - auto-expands all ancestors when a deeply nested agent is active
+ * - handles agents with no children (leaf nodes)
+ * - renders multiple main agents in the same session
+ * - renders sibling subagents at the same depth
+ *
+ * Maintenance rules
+ * - Keep assertions at observable boundaries: rendered output, public return values, emitted events, or
+ *   wire payloads.
+ * - When behavior changes intentionally, update the matching case title and this map in the same
+ *   review.
+ * - Prefer one reason for failure per case; shared setup may remove noise but must not hide the state
+ *   under test.
+ * - Reset spies, fake timers, storage, and singleton subscriptions so reruns and shuffled execution
+ *   remain stable.
+ * - Add regression coverage beside the narrowest existing group that expresses the affected user or API
+ *   contract.
+ * - Query the UI by role or accessible name first; test IDs are reserved for structure with no semantic
+ *   selector.
+ * - Keep client fixtures aligned with `lib/types.ts` and server response shapes so mocks do not mask
+ *   contract drift.
+ *
+ * Verification
+ * - Run `npm run test:client` and `npm run typecheck:client` after changing this area.
+ * - The repository-wide `npm run verify` gate also checks headers, formatting, server tests, and client
+ *   tests.
+ * ============================================================================= */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router";
+import { SessionDetail } from "../SessionDetail";
+import type { Agent, Session, DashboardEvent } from "../../lib/types";
+import { fmtCost } from "../../lib/format";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: "agent-1",
+    session_id: "sess-1",
+    name: "Main Agent",
+    type: "main",
+    subagent_type: null,
+    status: "working",
+    task: null,
+    current_tool: null,
+    started_at: "2026-03-05T10:00:00.000Z",
+    ended_at: null,
+    updated_at: "2026-03-05T10:00:00.000Z",
+    parent_agent_id: null,
+    metadata: null,
+    ...overrides,
+  };
+}
+
+const mockSession: Session = {
+  id: "sess-1",
+  name: "Test Session",
+  status: "active",
+  cwd: "/test",
+  model: "claude-opus-4-6",
+  started_at: "2026-03-05T10:00:00.000Z",
+  ended_at: null,
+  metadata: null,
+};
+
+// ── Mock API ─────────────────────────────────────────────────────────────────
+
+let mockAgents: Agent[] = [];
+let mockCost: { total_cost: number; breakdown: unknown[] } = { total_cost: 0, breakdown: [] };
+const eventBusHandlers = new Set<(message: { type: "new_event"; data: DashboardEvent }) => void>();
+
+vi.mock("../../lib/api", () => ({
+  api: {
+    sessions: {
+      get: vi.fn(() =>
+        Promise.resolve({
+          session: mockSession,
+          agents: mockAgents,
+          events: [] as DashboardEvent[],
+        })
+      ),
+      transcripts: vi.fn(() => Promise.resolve({ transcripts: [] })),
+      stats: vi.fn(() =>
+        Promise.resolve({
+          session_id: mockSession.id,
+          total_events: 0,
+          events_by_type: [],
+          tools_used: [],
+          error_count: 0,
+          first_event_at: null,
+          last_event_at: null,
+          agents: { total: 0, main: 0, subagent: 0, compaction: 0, by_status: {} },
+          subagent_types: [],
+          tokens: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+        })
+      ),
+    },
+    pricing: {
+      sessionCost: vi.fn(() => Promise.resolve(mockCost)),
+    },
+    events: {
+      list: vi.fn(() =>
+        Promise.resolve({
+          events: [] as DashboardEvent[],
+          limit: 50,
+          offset: 0,
+          total: 0,
+        })
+      ),
+      facets: vi.fn(() => Promise.resolve({ event_types: [], tool_names: [] })),
+    },
+  },
+}));
+
+vi.mock("../../lib/eventBus", () => ({
+  eventBus: {
+    subscribe: vi.fn((handler: (message: { type: "new_event"; data: DashboardEvent }) => void) => {
+      eventBusHandlers.add(handler);
+      return () => eventBusHandlers.delete(handler);
+    }),
+  },
+}));
+
+function renderPage() {
+  return render(
+    <MemoryRouter initialEntries={["/sessions/sess-1"]}>
+      <Routes>
+        <Route path="/sessions/:id" element={<SessionDetail />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+/** Get the agent-tree region for scoped queries (avoids matches in the active-agent banner). */
+async function findTree() {
+  return await screen.findByTestId("agent-tree");
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe("SessionDetail - Nested Agent Tree Rendering", () => {
+  beforeEach(() => {
+    mockAgents = [];
+    mockCost = { total_cost: 0, breakdown: [] };
+    eventBusHandlers.clear();
+  });
+
+  it("shows the session total cost on the main agent card (cost is loaded separately)", async () => {
+    // Regression: /api/sessions/:id has no cost column, so the main card (which
+    // renders session.cost) showed nothing until SessionDetail injected the
+    // separately-loaded total into the card's session prop.
+    mockCost = { total_cost: 42.5, breakdown: [] };
+    mockAgents = [makeAgent({ id: "main-1", name: "Main Agent", type: "main", status: "waiting" })];
+    renderPage();
+    const tree = await findTree();
+    await waitFor(() => expect(within(tree).getByText(fmtCost(42.5))).toBeInTheDocument());
+  });
+
+  it("does not reload session details for another session's task event", async () => {
+    const { api } = await import("../../lib/api");
+    mockAgents = [makeAgent({ id: "main-1", name: "Main Agent" })];
+    renderPage();
+    await findTree();
+    await waitFor(() => expect(api.sessions.get).toHaveBeenCalled());
+    const sessionLoads = vi.mocked(api.sessions.get).mock.calls.length;
+    const pricingLoads = vi.mocked(api.pricing.sessionCost).mock.calls.length;
+
+    const message = {
+      type: "new_event" as const,
+      data: {
+        id: 91,
+        session_id: "sess-2",
+        agent_id: "sess-2-main",
+        event_type: "TaskCompleted",
+        tool_name: null,
+        summary: "Finished another session task",
+        data: null,
+        created_at: "2026-03-05T10:05:00.000Z",
+      },
+    };
+    eventBusHandlers.forEach((handler) => handler(message));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.sessions.get).toHaveBeenCalledTimes(sessionLoads);
+    expect(api.pricing.sessionCost).toHaveBeenCalledTimes(pricingLoads);
+  });
+
+  it("renders a flat main → subagent hierarchy (depth 1)", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main Agent", type: "main", status: "working" }),
+      makeAgent({
+        id: "sub-1",
+        name: "Explorer",
+        type: "subagent",
+        subagent_type: "Explore",
+        status: "working",
+        parent_agent_id: "main-1",
+      }),
+    ];
+
+    renderPage();
+    expect(await screen.findByText("Main Agent")).toBeInTheDocument();
+    // Subagent should be visible (auto-expanded because it's working)
+    expect(await screen.findByText("Explorer")).toBeInTheDocument();
+  });
+
+  it("renders deeply nested agents (depth 3: main → L1 → L2 → L3)", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "waiting" }),
+      makeAgent({
+        id: "l1",
+        name: "Level-1",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "l2",
+        name: "Level-2",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "l1",
+      }),
+      makeAgent({
+        id: "l3",
+        name: "Level-3",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "l2",
+      }),
+    ];
+
+    renderPage();
+    const tree = await findTree();
+    // All levels should render in the tree (auto-expanded because they have working children).
+    // The active-agent banner may also display "Level-1", so we scope to the tree.
+    //
+    // Wait on the DEEPEST node, never on "Main": the tree renders (and "Main"
+    // appears) before the ancestor-expansion effect has run, so waiting on the
+    // root can resolve while every descendant is still collapsed. The deepest
+    // label is only reachable once each ancestor expanded, which is exactly the
+    // condition under test.
+    await waitFor(() => expect(within(tree).getByText("Level-3")).toBeInTheDocument());
+    expect(within(tree).getByText("Main")).toBeInTheDocument();
+    expect(within(tree).getByText("Level-1")).toBeInTheDocument();
+    expect(within(tree).getByText("Level-2")).toBeInTheDocument();
+  });
+
+  it("shows descendant count in collapsed badge for nested agents", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "waiting" }),
+      makeAgent({
+        id: "l1",
+        name: "Level-1",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "l2",
+        name: "Level-2",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "l1",
+      }),
+      makeAgent({
+        id: "l3a",
+        name: "Level-3a",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "l2",
+      }),
+      makeAgent({
+        id: "l3b",
+        name: "Level-3b",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "l2",
+      }),
+    ];
+
+    renderPage();
+    // Main has 4 total descendants (L1, L2, L3a, L3b) - should show "4 subagents" when collapsed
+    expect(await screen.findByText("4 subagents")).toBeInTheDocument();
+  });
+
+  it("expands and collapses nested agent groups", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "waiting" }),
+      makeAgent({
+        id: "l1",
+        name: "Level-1",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "l2",
+        name: "Level-2",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "l1",
+      }),
+    ];
+
+    renderPage();
+    // Initially collapsed (agents are completed, no auto-expand)
+    expect(await screen.findByText("2 subagents")).toBeInTheDocument();
+    expect(screen.queryByText("Level-1")).not.toBeInTheDocument();
+
+    // Click the count badge to expand
+    fireEvent.click(screen.getByText("2 subagents"));
+    expect(await screen.findByText("Level-1")).toBeInTheDocument();
+    // Level-2 is still nested under Level-1 which is collapsed
+    expect(screen.getByText("1 subagent")).toBeInTheDocument();
+  });
+
+  it("renders orphaned subagents in dedicated section", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "waiting" }),
+      makeAgent({
+        id: "orphan-1",
+        name: "Orphan Agent",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "nonexistent-parent",
+      }),
+    ];
+
+    renderPage();
+    const tree = await findTree();
+    expect(within(tree).getByText("Main")).toBeInTheDocument();
+    expect(within(tree).getByText("Orphan Agent")).toBeInTheDocument();
+    expect(await screen.findByText("Unparented Subagents")).toBeInTheDocument();
+  });
+
+  it("auto-expands all ancestors when a deeply nested agent is active", async () => {
+    // Level-3 is working → Level-2, Level-1, and Main should all auto-expand
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "waiting" }),
+      makeAgent({
+        id: "l1",
+        name: "Level-1",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "l2",
+        name: "Level-2",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "l1",
+      }),
+      makeAgent({
+        id: "l3",
+        name: "Deep Active",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "l2",
+      }),
+    ];
+
+    renderPage();
+    const tree = await findTree();
+    // All levels should be visible because l3 is working, triggering ancestor
+    // expansion. Wait on the deepest node rather than "Main" — the tree (and
+    // its root label) render before the expansion effect runs, so waiting on
+    // the root proved nothing and this assertion raced the effect. CI caught
+    // it with the tree rendered but still aria-expanded="false".
+    await waitFor(() => expect(within(tree).getByText("Deep Active")).toBeInTheDocument());
+    expect(within(tree).getByText("Main")).toBeInTheDocument();
+    expect(within(tree).getByText("Level-1")).toBeInTheDocument();
+    expect(within(tree).getByText("Level-2")).toBeInTheDocument();
+  });
+
+  it("handles agents with no children (leaf nodes)", async () => {
+    mockAgents = [makeAgent({ id: "main-1", name: "Main", type: "main", status: "working" })];
+
+    renderPage();
+    expect(await screen.findByText("Main")).toBeInTheDocument();
+    // No subagent-count button should exist for a leaf node. Match the
+    // "{{count}} subagent(s)" label specifically so we don't collide with
+    // the word "subagent" in unrelated explanatory copy elsewhere on the page.
+    expect(screen.queryByText(/\d+ subagent/)).not.toBeInTheDocument();
+  });
+
+  it("renders multiple main agents in the same session", async () => {
+    // Edge case: import/resume could create multiple "main" entries
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main-A", type: "main", status: "completed" }),
+      makeAgent({ id: "main-2", name: "Main-B", type: "main", status: "working" }),
+      makeAgent({
+        id: "sub-a",
+        name: "Sub of A",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "sub-b",
+        name: "Sub of B",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "main-2",
+      }),
+    ];
+
+    renderPage();
+    const tree = await findTree();
+    // "Sub of B" is the node gated on auto-expansion, so wait on it rather than
+    // on a root label that renders before the expansion effect has run.
+    await waitFor(() => expect(within(tree).getByText("Sub of B")).toBeInTheDocument());
+    expect(within(tree).getByText("Main-A")).toBeInTheDocument();
+    expect(within(tree).getByText("Main-B")).toBeInTheDocument();
+  });
+
+  it("renders sibling subagents at the same depth", async () => {
+    mockAgents = [
+      makeAgent({ id: "main-1", name: "Main", type: "main", status: "working" }),
+      makeAgent({
+        id: "sub-a",
+        name: "Sibling-A",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "sub-b",
+        name: "Sibling-B",
+        type: "subagent",
+        status: "working",
+        parent_agent_id: "main-1",
+      }),
+      makeAgent({
+        id: "sub-c",
+        name: "Sibling-C",
+        type: "subagent",
+        status: "completed",
+        parent_agent_id: "main-1",
+      }),
+    ];
+
+    renderPage();
+    expect(await screen.findByText("Main")).toBeInTheDocument();
+    expect(await screen.findByText("Sibling-A")).toBeInTheDocument();
+    expect(await screen.findByText("Sibling-B")).toBeInTheDocument();
+    expect(await screen.findByText("Sibling-C")).toBeInTheDocument();
+  });
+});

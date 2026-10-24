@@ -1,0 +1,18 @@
+{
+  "name": "ccam-insights",
+  "description": "AI-powered insights for Claude Code — pattern detection, anomaly alerting, optimization recommendations, and session comparison using Agent Monitor analytics.",
+  "version": "2.4.3",
+  "author": { "name": "Son Nguyen", "url": "https://github.com/hoangsonww" },
+  "homepage": "https://github.com/hoangsonww/Claude-Code-Agent-Monitor",
+  "repository": "https://github.com/hoangsonww/Claude-Code-Agent-Monitor",
+  "license": "MIT",
+  "keywords": [
+    "insights",
+    "patterns",
+    "anomaly-detection",
+    "optimization",
+    "ai-analytics",
+    "claude-code"
+  ],
+  "skills": "./skills/"
+}

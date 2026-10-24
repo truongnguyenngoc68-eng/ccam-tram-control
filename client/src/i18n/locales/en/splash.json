@@ -1,0 +1,116 @@
+{
+  "greeting": {
+    "morning": "Good morning",
+    "afternoon": "Good afternoon",
+    "evening": "Good evening",
+    "night": "Working late"
+  },
+  "tagline": "Nothing your agents do stays in the dark.",
+  "sub1": "Real-time observability for Claude Code, Cursor, and Codex sessions.",
+  "sub2": "Tokens, tools, costs, and workflows, all live.",
+  "brand": "Claude Code Monitor",
+  "provider": {
+    "title": "What would you like to monitor?",
+    "description": "Choose the data source shown across the dashboard. You can change this later in Settings.",
+    "claude": {
+      "description": "Claude Code plus Cursor sessions, agents, histories, and costs — included out of the box."
+    },
+    "codex": {
+      "description": "Codex sessions, GPT token usage, and costs."
+    },
+    "both": {
+      "label": "Both",
+      "description": "All Claude Code, Cursor, and Codex sessions, usage, and costs."
+    },
+    "beta": "Beta",
+    "continue": "Continue to dashboard"
+  },
+  "hookGate": {
+    "kicker": "Live tracking",
+    "title": "Set up live monitoring",
+    "description": "Install lightweight local hooks only for the selected providers that still need them.",
+    "selectedProviders": "Hooks still needed for",
+    "realTime": "Hooks send lifecycle events to this local dashboard in real time. Your data stays on this machine.",
+    "checking": "Checking existing hook setup...",
+    "installed": "Hooks installed and ready for live monitoring",
+    "existing": "Existing dashboard hooks detected",
+    "ready": "Ready to install selected hooks",
+    "overrideWarning": "Dashboard hooks already exist for a selected provider. Installing refreshes only the dashboard entries. Your unrelated hooks are preserved.",
+    "output": "Installation output",
+    "failure": "Could not install all selected hooks. Review the output, then try again or continue if you completed setup another way.",
+    "checkFailed": "We could not check your current hook setup. You can still install the selected hooks.",
+    "preserveNote": "This only manages dashboard hooks. Your other hooks stay unchanged.",
+    "alreadyInstalled": "I have already installed hooks",
+    "install": "Install hooks",
+    "installing": "Installing hooks...",
+    "continue": "Continue to dashboard"
+  },
+  "taglines": [
+    "Nothing your agents do stays in the dark.",
+    "See every move your agents make.",
+    "Your agents, fully observable.",
+    "Every token, tool, and turn — in plain sight.",
+    "Watch your fleet think.",
+    "Where Claude Code sessions come into focus.",
+    "Real-time eyes on every agent.",
+    "From prompt to result, all on the record.",
+    "The control room for your AI agents.",
+    "Every subagent accounted for.",
+    "Know exactly what your agents cost.",
+    "Your agentic workflows, made legible.",
+    "Observe. Measure. Optimize.",
+    "Mission control for Claude Code.",
+    "Turn agent chaos into a clear picture.",
+    "The receipts for every run."
+  ],
+  "subs": [
+    [
+      "Real-time observability for every Claude Code session.",
+      "Tokens, tools, costs, and workflows, all live."
+    ],
+    [
+      "Live sessions, agents, and events as they happen.",
+      "Per-model token and cost breakdowns, no guesswork."
+    ],
+    [
+      "Trace every tool call across your agent tree.",
+      "Spot the slow turn, the costly model, the silent failure."
+    ],
+    ["Hooks stream straight to a local dashboard.", "Your data never leaves your machine."],
+    [
+      "Watch orchestrators delegate to subagents.",
+      "DAGs, concurrency, and error propagation, visualized."
+    ],
+    [
+      "Cost tracking down to the cache token.",
+      "Per-model pricing with compaction-aware baselines."
+    ],
+    [
+      "Every session, agent, and event in one place.",
+      "Search, replay, and inspect without leaving the room."
+    ],
+    [
+      "From SessionStart to SessionEnd, captured.",
+      "Compactions, API errors, and turn durations included."
+    ],
+    [
+      "Know which model did what, and what it cost.",
+      "Subagents priced at their own rate, not the orchestrator's."
+    ],
+    ["Workflow fleets and inner agents, surfaced.", "Even the runs that never fire a hook."],
+    ["A local-first window into your agents.", "No cloud, no account, no telemetry."],
+    [
+      "Measure productivity, not vibes.",
+      "Velocity, cache efficiency, and tool effectiveness, scored."
+    ],
+    [
+      "Catch the anomaly before the invoice does.",
+      "Cost outliers and token spikes, flagged early."
+    ],
+    [
+      "Your Claude Code config, fully mapped.",
+      "Skills, agents, hooks, MCP, and memory at a glance."
+    ]
+  ],
+  "paletteHint": "Tip — press {{chord}} anytime to jump to any page, session, or setting."
+}

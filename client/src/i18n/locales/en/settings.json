@@ -1,0 +1,637 @@
+{
+  "title": "Settings",
+  "subtitle": "Manage pricing, notifications, data, and hooks",
+  "exportData": "Export Data",
+  "acrossSessions": "Across all tracked sessions",
+  "basedOnUsage": "Based on per-model token usage",
+  "tabby": {
+    "title": "Tabby companion",
+    "description": "A floating cat that reacts to your live sessions.",
+    "enable": "Show Tabby",
+    "enableDesc": "Display the corner companion across the dashboard (⌘B to open)"
+  },
+  "sound": {
+    "title": "Sound",
+    "description": "Short, quiet chimes for live session activity. Generated in the browser - no downloads, no tracking.",
+    "enable": "Enable Sound Cues",
+    "enableDesc": "Play a subtle tone when sessions start, finish, or error out",
+    "volume": "Volume",
+    "playWhen": "Play a cue when...",
+    "newSession": "A session starts",
+    "sessionComplete": "A session finishes responding",
+    "sessionError": "A session errors",
+    "subagentSpawned": "A subagent spawns",
+    "notification": "Claude Code sends a notification",
+    "connection": "The live connection drops or returns",
+    "interaction": "Clicking buttons and links",
+    "interactionDesc": "A barely-audible tick on each press",
+    "preview": "Preview Sound",
+    "throttleInfo": "Cues are rate-limited, so a burst of activity never turns into a burst of sound.",
+    "disabledInfo": "Sound cues are off - the dashboard stays completely silent"
+  },
+  "pricing": {
+    "title": "Anthropic Claude Model Pricing",
+    "navClaude": "Claude Pricing",
+    "navCursor": "Cursor Pricing",
+    "navGpt": "Codex Pricing",
+    "description": "Anthropic API rates per million tokens (USD). Use % as wildcard in patterns. Some models have a time-limited introductory rate (shown in violet); usage on or before its cutoff date is billed at that rate, and usage after it at the standard rate.",
+    "introNote": "Intro ${{input}}/${{output}} through {{until}}",
+    "introRatesTitle": "Introductory rates",
+    "introRatesHint": "Leave the date empty for no promo",
+    "introUntil": "Through (date)",
+    "introUntilInvalid": "Introductory cutoff must be a YYYY-MM-DD date",
+    "resetConfirm": "Confirm Reset",
+    "resetDefaults": "Reset Defaults",
+    "resetResult": "Reset to {{count}} default rules",
+    "addModel": "Add Model",
+    "pattern": "Pattern",
+    "patternPlaceholder": "claude-opus-4%",
+    "namePlaceholder": "Claude Opus 4",
+    "validationRequired": "Pattern and display name are required",
+    "lastUpdated": "Last updated: ",
+    "tooltip": {
+      "title": "How model pricing works",
+      "howItWorks": "How it works",
+      "howItWorksBody": "When a session reports usage, the dashboard finds the first pricing rule whose pattern matches the model id and multiplies (input tokens / 1M) and (output tokens / 1M) by the rates below to compute cost. Rules are evaluated top-to-bottom - the first match wins.",
+      "patternsTitle": "Pattern syntax",
+      "patternsBody": "Patterns are SQL-style globs. % is a wildcard that matches any characters. For example: claude-opus-4-7% matches every model id that starts with claude-opus-4-7 (e.g. claude-opus-4-7, claude-opus-4-7-20260101). claude-%-haiku matches any haiku variant. An exact id like claude-sonnet-4-6 only matches itself.",
+      "manualUpdates": "You must update prices manually",
+      "manualUpdatesBody": "Anthropic publishes pricing changes on their website - there is no live feed. When a new model launches or rates change, edit the matching rule (or add a new one above the catch-all) so newly recorded sessions are costed correctly. Already-stored sessions keep the price that was applied at ingest time.",
+      "apiPricing": "Reference only - API rates",
+      "apiPricingBody": "These are pay-as-you-go API rates. If you use Claude Code on a subscription plan (Pro, Max, Team, or Enterprise), your actual cost is a flat monthly fee, not per-token - so these figures will usually be higher than what you really pay. Treat the costs here as a usage estimate for reference, not a bill."
+    },
+    "cacheWrite5m": "Cache Write (5m)",
+    "cacheWrite1h": "Cache Write (1h)",
+    "fastInput": "Fast Input",
+    "fastOutput": "Fast Output",
+    "cursor": {
+      "title": "Cursor Model Pricing",
+      "description": "Cursor's published rates for Cursor-native and routed third-party models. USD per 1M tokens; the most specific matching pattern wins.",
+      "source": "View Cursor Models & Pricing ↗",
+      "planNote": "Estimates use Cursor's per-token rate card. Included usage pools, plan allowances, Auto routing, and team token-rate billing can make your actual subscription charge differ.",
+      "name": "Name",
+      "input": "Input",
+      "write": "Cache write",
+      "cached": "Cache read",
+      "output": "Output",
+      "deleteConfirm": "Delete this Cursor pricing rule?",
+      "tooltip": {
+        "title": "How Cursor pricing works",
+        "howItWorks": "How it works",
+        "howItWorksBody": "Cursor session usage is priced only against this Cursor rate card. Input, cache-write, cache-read, and output tokens are calculated independently in USD per 1M tokens.",
+        "patternsTitle": "Pattern syntax",
+        "patternsBody": "Patterns use SQL-style % wildcards. More-specific patterns win, so a Fast or versioned model can safely override a broader family rule.",
+        "manualUpdates": "You must update prices manually",
+        "manualUpdatesBody": "Cursor publishes model pricing changes on its website; there is no live feed. Add or edit a rule when Cursor changes a model name or rate.",
+        "apiPricing": "Plan billing can differ",
+        "apiPricingBody": "The rate card estimates token value. Monthly included pools, additional usage, Auto routing, and Teams or Enterprise billing rules are not reconstructed by the dashboard."
+      }
+    },
+    "gpt": {
+      "title": "OpenAI GPT Model Pricing",
+      "description": "Published OpenAI API rates for Codex usage. Standard requests use Short rates at or below 272K input tokens and Long rates above 272K; Fast mode has separate Short and Long rates. USD per 1M tokens.",
+      "tooltip": {
+        "title": "How GPT pricing works",
+        "howItWorks": "How it works",
+        "howItWorksBody": "Every amount is USD per 1M tokens. Standard Codex requests use Short rates at or below 272K input tokens and Long rates above 272K. Fast mode has separate Short and Long rates. Fresh input, cached input, cache writes, and output are priced separately.",
+        "patternsTitle": "Pattern syntax",
+        "patternsBody": "Patterns use SQL-style % wildcards. The dashboard evaluates the most specific model patterns first and uses the first rule that matches the reported model id.",
+        "manualUpdates": "You must update prices manually",
+        "manualUpdatesBody": "OpenAI publishes API pricing changes on its website; there is no live feed. Update or add a matching rule when models or rates change so newly recorded usage is priced correctly.",
+        "apiPricing": "Unpublished rates stay unpriced",
+        "apiPricingBody": "An em dash means OpenAI does not publish that context or Fast-mode rate. Matching usage is marked unpriced instead of being estimated. These are pay-as-you-go API rates for reference, not subscription-plan billing."
+      },
+      "name": "Name",
+      "short": "Standard · Short ≤272K",
+      "long": "Standard · Long >272K",
+      "fast": "Fast · Short ≤272K",
+      "fastLong": "Fast · Long >272K",
+      "input": "Input",
+      "cached": "Cached",
+      "write": "Cache write",
+      "output": "Output",
+      "deleteConfirm": "Delete this GPT pricing rule?"
+    }
+  },
+  "claudeHome": {
+    "title": "Claude Code home",
+    "description": "The root directory for Claude Code transcripts, imports, and configuration. Changing it updates subsequent file reads immediately.",
+    "save": "Save",
+    "saving": "Saving...",
+    "current": "Current:",
+    "placeholder": "/path/to/claude-home",
+    "saveFailed": "Failed to update CLAUDE_HOME"
+  },
+  "codexHome": {
+    "title": "Codex home",
+    "description": "The root directory for Codex rollout sessions and hooks. Saving a new location re-arms live monitoring and scans its sessions immediately.",
+    "save": "Save",
+    "saving": "Saving...",
+    "current": "Current:",
+    "placeholder": "/path/to/codex-home",
+    "saveFailed": "Failed to update the Codex home"
+  },
+  "homes": {
+    "title": "Session Data Locations",
+    "description": "Configure the local Claude Code and Codex directories the dashboard reads. Each saved location is applied without restarting the app."
+  },
+  "display": {
+    "title": "Dashboard Data",
+    "description": "Choose which product’s sessions, tokens, costs, and activity appear across the app. The change takes effect immediately and remains independent from the machine data-source filter.",
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "both": "Both",
+    "claudeDescription": "Show Claude Code and Cursor data.",
+    "codexDescription": "Show only Codex data.",
+    "bothDescription": "Combine Claude Code, Cursor, and Codex data.",
+    "beta": "Beta"
+  },
+  "hooks": {
+    "title": "Hook Configuration",
+    "description": "Claude Code and Codex hooks forward events to the dashboard in real time.",
+    "allInstalled": "All hooks installed",
+    "someInstalled": "Hooks configured",
+    "incomplete": "Hooks incomplete",
+    "reinstall": "Reinstall Hooks",
+    "configure": "Configure Hooks",
+    "success": "Hooks installed successfully",
+    "failed": "Hook installation failed",
+    "display": {
+      "title": "Dashboard data",
+      "description": "Immediately filter every dashboard view to a product. Machine data-source filtering remains independent.",
+      "both": "Both"
+    },
+    "modal": {
+      "title": "Install dashboard hooks",
+      "description": "Select one or both products. Existing dashboard hook entries are updated; your unrelated hook commands stay untouched.",
+      "claude": "Lifecycle hooks from ~/.claude/settings.json.",
+      "codex": "Lifecycle hooks from ~/.codex/hooks.json, with rollout JSONL as a real-time fallback.",
+      "installed": "Already installed",
+      "overrideWarning": "Existing hook configuration was found for one or more selected products. Continuing replaces only this dashboard's matching entries and preserves unrelated hooks.",
+      "preserveNote": "At least one product must be selected.",
+      "install": "Install selected hooks",
+      "failed": "Could not install the selected hooks."
+    }
+  },
+  "notifications": {
+    "title": "Notifications",
+    "description": "Browser notifications for important events. Requires permission.",
+    "enable": "Enable Browser Notifications",
+    "granted": "Permission granted",
+    "blocked": "Permission blocked",
+    "required": "Permission required",
+    "notifyWhen": "Notify me when...",
+    "newSession": "New session starts",
+    "sessionComplete": "Session completes",
+    "sessionError": "Session errors",
+    "subagentSpawned": "Subagent spawned",
+    "testTitle": "Agent Monitor",
+    "testBody": "Notifications are working!",
+    "sendTest": "Send Test Notification",
+    "disabledInfo": "Notifications are disabled - enable to get alerts for session events"
+  },
+  "import": {
+    "title": "Import History",
+    "providerLabel": "Import provider",
+    "providerHint": "Choose the local agent history you want to bring into this dashboard.",
+    "providerClaude": "Claude Code",
+    "providerCodex": "Codex",
+    "backupProviderNote": "Dashboard exports can contain Claude Code and Codex data. Restore merges every provider included in the export.",
+    "description": "Bring existing Claude Code sessions into the dashboard. Token counts, per-model cost, compactions, subagents, tool uses, and turn durations are reconstructed from the original JSONL transcripts - identical to how live sessions are captured.",
+    "scopeNote": "This import processes only Claude Code transcripts. It never changes your Codex history or either CLI configuration.",
+    "accuracyNote": "Re-running is safe. Sessions are deduplicated by session ID, and compaction baselines ensure token totals never double-count.",
+    "supportedFiles": "Supported inputs: .jsonl, .meta.json, .zip, .tar, .tar.gz, .tgz, .gz",
+    "instructions": "How to gather your history",
+    "stepLocate": "1. Locate your Claude Code history",
+    "stepLocateBody": "Every Claude Code session is stored as a JSONL transcript under the projects folder. Each subfolder is named after the working directory where the session started (slashes replaced with dashes).",
+    "stepArchive": "2. Bundle it for transfer (optional)",
+    "stepArchiveBody": "To move history from another machine, archive the whole folder first, then copy it over (AirDrop, scp, USB, cloud storage):",
+    "stepChoose": "3. Pick an import mode below",
+    "stepChooseBody": "Rescan the default location, point at any folder you've extracted history into, or upload files/archives directly.",
+    "stepVerify": "4. Verify tokens and cost",
+    "stepVerifyBody": "After import, open Analytics → Cost to confirm the breakdown. Re-importing the same session is always safe.",
+    "defaultLocation": "Default location on this machine",
+    "locationFound": "Folder found",
+    "locationMissing": "Folder not found",
+    "projectsLabel": "projects",
+    "jsonlLabel": "JSONL files",
+    "modeRescan": "Rescan default folder",
+    "modeRescanDesc": "Re-read ~/.claude/projects and import anything new.",
+    "modeFolder": "Scan a folder",
+    "modeFolderDesc": "Scan any directory on this machine for JSONL transcripts (walks subfolders).",
+    "modeUpload": "Upload files",
+    "modeUploadDesc": "Drop JSONL files or an archive (.zip / .tar.gz) directly into the browser.",
+    "modeBackup": "Restore backup",
+    "modeBackupDesc": "Import a dashboard export (.json) from Export data — merge another machine's history in.",
+    "backupHint": "Drop an export .json here or click to select",
+    "backupSub": "The file produced by the Export data button (top of Settings)",
+    "runRestore": "Restore",
+    "backupResult": {
+      "title": "Restore complete",
+      "sessionsImported": "Sessions added: {{count}}",
+      "sessionsSkipped": "Already present: {{count}}",
+      "events": "Events: {{count}}",
+      "pricing": "Pricing rules: {{count}}",
+      "detail": "{{agents}} agents · {{workflows}} workflows · {{runs}} runs · {{rules}} alert rules"
+    },
+    "folderPlaceholder": "/absolute/path/to/claude-history",
+    "folderHelper": "Absolute path. Tilde (~) is expanded. Subfolders are scanned recursively.",
+    "runRescan": "Rescan Now",
+    "runScan": "Scan Folder",
+    "runUpload": "Upload & Import",
+    "dropzoneHint": "Drag files here or click to select",
+    "dropzoneSub": "Accepts .jsonl, .meta.json, .zip, .tar, .tar.gz, .tgz, .gz",
+    "filesSelected": "{{count}} file(s) selected",
+    "clearSelection": "Clear",
+    "copy": "Copy",
+    "copied": "Copied",
+    "progress": {
+      "scan": "Scanning directory...",
+      "extract": "Extracting archives ({{processed}}/{{total}})...",
+      "parse": "Parsing transcripts ({{processed}}/{{total}})...",
+      "complete": "Import complete",
+      "error": "Import failed"
+    },
+    "result": {
+      "imported": "Imported: {{count}}",
+      "backfilled": "Enriched existing: {{count}}",
+      "skipped": "Already up to date: {{count}}",
+      "errors": "Errors: {{count}}",
+      "filesScanned": "Files scanned: {{count}}",
+      "title": "Last import result"
+    },
+    "errors": {
+      "noFiles": "No files selected",
+      "noJsonl": "No .jsonl files were found in the uploaded content",
+      "pathRequired": "Path is required",
+      "pathInvalid": "Path must be absolute",
+      "pathNotFound": "Path does not exist",
+      "pathNotDir": "Path is not a directory",
+      "generic": "Import failed: {{message}}"
+    },
+    "codex": {
+      "description": "Bring existing Codex sessions into the dashboard. User messages, assistant output, token snapshots, tool calls, and waiting/active lifecycle state are reconstructed from the original rollout JSONL files using the same pipeline as real-time monitoring.",
+      "scopeNote": "This import processes only {{provider}} transcripts. It never changes your Claude Code history or Codex CLI configuration.",
+      "accuracyNote": "Re-running is safe. Imported rollout cursors are retained, so already-accounted token deltas and tool calls are never added twice.",
+      "stepLocate": "1. Locate your Codex rollout history",
+      "stepLocateBody": "Codex stores each session as an append-only rollout JSONL file under the sessions folder. Its nested date folders are scanned automatically.",
+      "stepArchive": "2. Bundle it for transfer (optional)",
+      "stepArchiveBody": "To move history from another machine, archive the sessions folder first, then copy it over (AirDrop, scp, USB, cloud storage). Include session_index.jsonl too when you want native /rename titles from that machine.",
+      "stepChoose": "3. Pick an import mode below",
+      "stepChooseBody": "Rescan this machine's Codex sessions, point to a copied or extracted folder, or upload rollout files and archives directly.",
+      "stepVerify": "4. Verify tokens and cost",
+      "stepVerifyBody": "After import, open Analytics → Cost to confirm the breakdown. The same rollout can always be imported again safely.",
+      "defaultLocation": "Default Codex sessions location on this machine",
+      "locationFound": "Sessions folder found",
+      "locationMissing": "Sessions folder not found",
+      "projectsLabel": "session folders",
+      "jsonlLabel": "rollout files",
+      "modeRescan": "Rescan Codex sessions",
+      "modeRescanDesc": "Re-read ~/.codex/sessions and import rollout history that is not in the dashboard yet.",
+      "modeFolder": "Scan a Codex folder",
+      "modeFolderDesc": "Scan a copied or extracted Codex directory for rollout JSONL files, including nested date folders.",
+      "modeUpload": "Upload Codex history",
+      "modeUploadDesc": "Drop rollout JSONL files or an archive (.zip / .tar.gz) directly into the browser.",
+      "folderPlaceholder": "/absolute/path/to/codex-history",
+      "folderHelper": "Absolute path. Tilde (~) is expanded. The folder and all nested date folders are scanned recursively for Codex rollout files.",
+      "runRescan": "Rescan Codex Now",
+      "runScan": "Scan Codex Folder",
+      "runUpload": "Upload & Import Codex",
+      "dropzoneHint": "Drag Codex rollout files here or click to select",
+      "dropzoneSub": "Accepts rollout .jsonl files, session_index.jsonl, .zip, .tar, .tar.gz, .tgz, and .gz archives"
+    }
+  },
+  "data": {
+    "title": "Data Management",
+    "description": "Database info, import/export, and cleanup.",
+    "dbOverview": "Database Overview",
+    "dbSize": "DB Size",
+    "loadingDb": "Loading database info...",
+    "sessionCleanup": "Session Cleanup",
+    "cleanupDesc": "Abandon stale sessions and purge old data",
+    "abandonAfter": "Abandon stale active sessions older than",
+    "purgeAfter": "Purge completed/errored sessions older than",
+    "confirmCleanup": "Confirm Cleanup",
+    "runCleanup": "Run Cleanup",
+    "nothingToClean": "Nothing to clean up",
+    "abandonedResult": " sessions abandoned",
+    "purgedResult": " sessions purged ({{events}} events, {{agents}} agents)",
+    "purgedSnapshots": "{{size}} of transcript snapshots removed"
+  },
+  "snapshots": {
+    "title": "Transcript Snapshots",
+    "description": "Durable copies that keep conversations readable after Claude Code, Codex, and Cursor delete their own transcripts.",
+    "loading": "Loading snapshot storage...",
+    "total": "Total",
+    "files_one": "{{formatted}} file",
+    "files_other": "{{formatted}} files",
+    "compressedShare": "{{compressed}} of {{total}} files compressed",
+    "policy": "Compression: {{compression}} · Age cap: {{age}} · Size cap: {{size}} (set with the DASHBOARD_SNAPSHOT_* environment variables)",
+    "on": "on",
+    "off": "off",
+    "unlimited": "none",
+    "days_one": "{{count}} day",
+    "days_other": "{{count}} days",
+    "compressNow": "Compress now",
+    "compressHint": "Lossless: only snapshots whose original is gone, verified before the plain copy is removed.",
+    "compressNone": "Nothing to compress. Every snapshot's original is still on disk or was active recently.",
+    "compressResult_one": "Compressed {{count}} snapshot ({{before}} → {{after}})",
+    "compressResult_other": "Compressed {{count}} snapshots ({{before}} → {{after}})",
+    "compressFailed_one": "{{count}} snapshot could not be compressed and was left unchanged.",
+    "compressFailed_other": "{{count}} snapshots could not be compressed and were left unchanged.",
+    "compressSkipped": "Skipped {{providers}}: the source folder is missing or unreadable, so nothing there was treated as deleted.",
+    "pruneTitle": "Prune old snapshots",
+    "pruneDesc": "Removes the snapshots of whole finished sessions, oldest first. Preview first: a pruned snapshot may be the only remaining copy of a conversation.",
+    "olderThan": "Older than",
+    "keepUnder": "Keep total under",
+    "includeOrphans": "Also remove snapshots of sessions no longer in the database",
+    "preview": "Preview",
+    "previewFirst": "Preview these settings first",
+    "prune": "Prune",
+    "confirmPrune": "Confirm prune",
+    "previewNone": "Nothing matches. No snapshots would be removed.",
+    "previewResult_one": "{{count}} session ({{files}} files, {{size}}) would be removed; {{remaining}} would remain.",
+    "previewResult_other": "{{count}} sessions ({{files}} files, {{size}}) would be removed; {{remaining}} would remain.",
+    "overCap": "Still {{size}} over the size cap. Active sessions and those active in the last 24 h are never pruned.",
+    "pruneWarning": "This permanently deletes these snapshots. Sessions whose originals were already deleted will lose their conversation.",
+    "pruneResult_one": "Pruned the snapshots of {{count}} session ({{size}})",
+    "pruneResult_other": "Pruned the snapshots of {{count}} sessions ({{size}})"
+  },
+  "danger": {
+    "title": "Danger Zone",
+    "description": "Irreversible actions that delete data permanently",
+    "warning": "This will delete all sessions, agents, events, and token data. Are you sure?",
+    "yesClearAll": "Yes, Clear All",
+    "clearAllData": "Clear All Data",
+    "clearedResult": "Cleared {{count}} rows"
+  },
+  "about": {
+    "title": "About",
+    "description": "Server runtime information.",
+    "release": "Release",
+    "uiBuild": "UI build v{{version}} (rebuild client to match)",
+    "uptime": "Uptime",
+    "nodejs": "Node.js",
+    "platform": "Platform",
+    "wsClients": "WS Clients",
+    "loadingInfo": "Loading server info..."
+  },
+  "tables": {
+    "sessions": "sessions",
+    "agents": "agents",
+    "events": "events",
+    "sessionsWithCost": "sessions with cost",
+    "pricingRules": "pricing rules",
+    "cursorPricingRules": "Cursor pricing rules"
+  },
+  "messages": {
+    "failedLoad": "Failed to load",
+    "failedSave": "Failed to save",
+    "failedDelete": "Failed to delete",
+    "unknownError": "Unknown",
+    "actionFailed": "Error: {{message}}"
+  },
+  "webhooks": {
+    "title": "Webhook Notifications",
+    "description": "Forward fired alerts to Slack, Discord, Microsoft Teams, or any HTTP endpoint. Delivery is automatic, retried on failure, and never blocks monitoring.",
+    "count_one": "{{count}} target",
+    "count_other": "{{count}} targets",
+    "add": "Add Webhook",
+    "loading": "Loading webhooks…",
+    "empty": "No webhooks configured. Add one to forward alerts to Slack, Discord, Teams, or a custom endpoint.",
+    "scopedTo_one": "{{count}} rule",
+    "scopedTo_other": "{{count}} rules",
+    "enabled": "Enabled",
+    "test": "Test",
+    "edit": "Edit",
+    "delete": "Delete",
+    "confirmDelete": "Confirm",
+    "testOk": "Delivered (HTTP {{status}})",
+    "testFail": "Failed: {{error}}",
+    "addTitle": "New Webhook",
+    "editTitle": "Edit Webhook",
+    "fieldName": "Name",
+    "fieldNamePlaceholder": "e.g. Team Slack #alerts",
+    "fieldType": "Type",
+    "type": {
+      "slack": "Slack",
+      "discord": "Discord",
+      "teams": "Microsoft Teams",
+      "generic": "Generic (custom JSON)"
+    },
+    "fieldUrl": "Webhook URL",
+    "urlKeepHint": "leave blank to keep current",
+    "urlKeepPlaceholder": "•••••••• (unchanged)",
+    "urlPlaceholder": {
+      "slack": "https://hooks.slack.com/services/…",
+      "discord": "https://discord.com/api/webhooks/…",
+      "teams": "https://outlook.office.com/webhook/…",
+      "generic": "https://example.com/webhook"
+    },
+    "fieldSecret": "Signing secret (optional)",
+    "secretPlaceholder": "HMAC-SHA256 secret",
+    "secretKeepPlaceholder": "•••••••• (leave blank to keep)",
+    "secretHint": "When set, requests are signed with an X-Webhook-Signature header.",
+    "fieldHeaders": "Custom headers (optional)",
+    "replaceHeaders": "Replace headers",
+    "headerKey": "Header",
+    "headerValue": "Value",
+    "addHeader": "Add header",
+    "scopeAll": "Receive alerts from all rules",
+    "enabledOnSave": "Enabled",
+    "save": "Save",
+    "create": "Create",
+    "cancel": "Cancel",
+    "urlOptional": "optional override",
+    "urlAuto": "URL is set automatically from the credentials below.",
+    "deleteTitle": "Delete webhook?",
+    "deleteMessage": "Delete \"{{name}}\"? Fired alerts will stop being delivered to this target. This cannot be undone.",
+    "guideToggle": "How to set up {{provider}}",
+    "guideDocs": "Official {{provider}} docs",
+    "guideStaleNote": "Provider setup screens change often, so these steps may be out of date - always confirm against the official docs."
+  },
+  "alertsHub": {
+    "title": "Alerts",
+    "description": "Define alert rules, route them to webhook channels, and review what has fired - all in one place.",
+    "tabRules": "Rules",
+    "tabChannels": "Channels",
+    "tabActivity": "Activity",
+    "rulesHint": "Conditions that trigger an alert. Evaluated server-side against the live event stream.",
+    "rulesEmptyHint": "Add a rule to start alerting on errors, inactivity, stuck agents, or token thresholds."
+  },
+  "jumpTo": "Jump to",
+  "webhookGuides": {
+    "slack": {
+      "steps": [
+        "Create or open a Slack app at api.slack.com/apps.",
+        "Turn on 'Incoming Webhooks', then click 'Add New Webhook to Workspace'.",
+        "Choose the channel to post to and authorize.",
+        "Copy the generated URL (https://hooks.slack.com/services/…) and paste it above."
+      ]
+    },
+    "discord": {
+      "steps": [
+        "Open your server → Server Settings → Integrations → Webhooks.",
+        "Click 'New Webhook', pick a channel, optionally rename it.",
+        "Click 'Copy Webhook URL' and paste it above."
+      ]
+    },
+    "teams": {
+      "steps": [
+        "In the target Teams channel, click ⋯ → 'Workflows'.",
+        "Pick the template 'Post to a channel when a webhook request is received'.",
+        "Finish the flow and copy the generated HTTP POST URL.",
+        "Paste it above. (Classic Office 365 connectors were retired in 2025 - use Workflows.)"
+      ]
+    },
+    "google_chat": {
+      "steps": [
+        "Open the Google Chat space → space title → 'Apps & integrations'.",
+        "Click 'Webhooks' → 'Add webhook' and give it a name.",
+        "Copy the webhook URL and paste it above."
+      ]
+    },
+    "mattermost": {
+      "steps": [
+        "Main Menu → Integrations → Incoming Webhooks (an admin must enable webhooks first).",
+        "Click 'Add Incoming Webhook' and choose a channel.",
+        "Save, then copy the webhook URL and paste it above."
+      ]
+    },
+    "rocketchat": {
+      "steps": [
+        "Administration → Integrations → New → Incoming.",
+        "Enable it, pick a channel, and save.",
+        "Copy the 'Webhook URL' and paste it above."
+      ]
+    },
+    "telegram": {
+      "steps": [
+        "Message @BotFather, run /newbot, and copy the bot token.",
+        "Add the bot to your group/channel (or just DM it).",
+        "Find the chat ID: send a message, open https://api.telegram.org/bot<token>/getUpdates, read result[].message.chat.id.",
+        "Enter the Bot token and Chat ID above - no URL needed."
+      ]
+    },
+    "pagerduty": {
+      "steps": [
+        "Open the target Service → Integrations → 'Add integration'.",
+        "Choose 'Events API v2'.",
+        "Copy the Integration Key (the routing key).",
+        "Enter it as the Routing key above - the Events API URL is prefilled."
+      ]
+    },
+    "opsgenie": {
+      "steps": [
+        "Settings → Integrations → add an 'API' integration.",
+        "Copy the generated API key.",
+        "Note your account region (US or EU).",
+        "Enter the API key and region above - the alerts URL is derived from the region."
+      ]
+    },
+    "splunk_oncall": {
+      "steps": [
+        "Integrations → REST Endpoint, and enable it.",
+        "Copy the REST URL - it already contains your API key.",
+        "Replace the trailing '$routing_key' with one of your routing keys.",
+        "Paste the full URL above."
+      ]
+    },
+    "zapier": {
+      "steps": [
+        "Create a Zap with the trigger 'Webhooks by Zapier' → 'Catch Hook'.",
+        "Copy the custom webhook URL it gives you.",
+        "Paste it above. The alert arrives as JSON: { event, alert }."
+      ]
+    },
+    "make": {
+      "steps": [
+        "Add a 'Webhooks' → 'Custom webhook' module as the first step of a scenario.",
+        "Click 'Add', create the hook, and copy its URL.",
+        "Paste it above, then run once so Make learns the payload shape."
+      ]
+    },
+    "n8n": {
+      "steps": [
+        "Add a 'Webhook' node to your workflow; set the method to POST.",
+        "Copy the Production URL.",
+        "Activate the workflow and paste the URL above (http is allowed for self-hosted)."
+      ]
+    },
+    "pipedream": {
+      "steps": [
+        "Create a workflow with an 'HTTP / Webhook' trigger.",
+        "Copy the unique endpoint URL.",
+        "Paste it above; inspect deliveries in the Pipedream event inspector."
+      ]
+    },
+    "generic": {
+      "steps": [
+        "Point this at any endpoint that accepts a JSON POST (https, or http for local testing).",
+        "Body shape: { event: 'alert.triggered', source, sent_at, alert: { … } }.",
+        "Optional: set a signing secret (HMAC-SHA256 over the body → X-Webhook-Signature header) and custom headers.",
+        "Tip: use a free inspector like webhook.site to see the exact payload."
+      ]
+    }
+  },
+  "remoteSources": {
+    "title": "Remote Data Sources",
+    "description": "Collect Claude Code and Codex usage from other machines over SSH - e.g. a dev box or cloud VM you drive over SSH while running this dashboard locally. Authentication uses your own SSH setup (~/.ssh/config, keys, agent); no passwords are stored here.",
+    "scopeTitle": "Data scope",
+    "scopeDesc": "Choose which machines' data the whole dashboard shows. Changes apply immediately across every page — sessions, analytics, and cost.",
+    "scopeAll": "All sources",
+    "scopeAllDesc": "This machine plus every configured remote source, combined.",
+    "scopeLocal": "This machine only",
+    "scopeLocalDesc": "Only sessions collected locally — hides all remote-source data.",
+    "scopeSelected": "Selected sources",
+    "scopeSelectedDesc": "Pick exactly which machines to include, below.",
+    "scopeSelectedCount": "{{n}} of {{total}} selected",
+    "scopePickMachines": "Machines to include",
+    "thisMachine": "This machine",
+    "listTitle": "Configured sources",
+    "add": "Add source",
+    "addTitle": "Add a remote source",
+    "editTitle": "Edit source",
+    "fieldLabel": "Label",
+    "fieldHost": "SSH host",
+    "fieldPort": "Port (optional)",
+    "fieldIdentity": "Identity file (optional)",
+    "fieldRemoteHome": "Remote Claude home (optional)",
+    "fieldRemoteHomeHint": "Linux/macOS: default ~/.claude (or an absolute path like /home/you/.claude). Windows SSH + Claude in WSL: leave blank (auto-detect) or use wsl:~/.claude. Native Windows: C:/Users/you/.claude.",
+    "fieldRemoteCodexHome": "Remote Codex home (optional)",
+    "fieldRemoteCodexHomeHint": "Defaults to ~/.codex and imports its sessions plus native renamed titles. For Windows SSH with Codex in WSL, leave blank (auto-detect) or use wsl:~/.codex.",
+    "fieldEnabled": "Sync automatically in the background",
+    "empty": "No remote sources yet.",
+    "emptyHint": "Add a machine you reach over SSH to pull its Claude Code and Codex usage in.",
+    "paused": "Auto-sync off",
+    "sessionCount": "{{n}} sessions",
+    "sessionCountLinked": "{{n}} linked",
+    "sessionCountHint": "Sessions linked to this source (not every session visible when data scope is All)",
+    "lastSync": "Last sync: {{when}}",
+    "neverSynced": "Never synced",
+    "imported": "{{n}} imported",
+    "syncNew": "{{n}} new",
+    "syncOnRemote": "{{n}} on remote",
+    "providerClaude": "Claude Code",
+    "providerCodex": "Codex",
+    "providerSessions": "{{n}} sessions",
+    "providerStatus": {
+      "idle": "Not checked",
+      "syncing": "Checking",
+      "ok": "Ready",
+      "unavailable": "Not found",
+      "error": "Unavailable"
+    },
+    "test": "Test",
+    "syncNow": "Sync",
+    "syncAll": "Sync all",
+    "enable": "Enable",
+    "disable": "Disable",
+    "confirmDelete": "Remove this source?",
+    "purgeData": "Also delete the sessions imported from this source (cannot be undone)",
+    "deleteAndPurge": "Remove + delete data",
+    "removeKeep": "Remove (keep data)",
+    "remoteSourceBadgeTitle": "Collected from a remote machine"
+  },
+  "cursorPathsNote": "Cursor is included with the Claude Code dashboard scope. Local history is discovered and snapshotted from ~/.cursor automatically; remote Cursor folders are not synced by Claude-only SSH imports."
+}

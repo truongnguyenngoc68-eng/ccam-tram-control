@@ -1,0 +1,91 @@
+{
+  "name": "claude-code-agent-monitor-plugins",
+  "description": "Official Claude Code plugin marketplace for CCAM with 14 plugins, 66 skills, 18 agents, 34 commands, and comprehensive local dashboard operations.",
+  "owner": { "name": "hoangsonww", "url": "https://github.com/hoangsonww" },
+  "plugins": [
+    {
+      "name": "ccam-analytics",
+      "source": "./plugins/ccam-analytics",
+      "description": "Deep analytics and monitoring for Claude Code sessions — cost tracking, token usage breakdowns, usage trends, and productivity scoring powered by Agent Monitor.",
+      "tags": ["analytics", "tokens", "cost", "productivity"]
+    },
+    {
+      "name": "ccam-config",
+      "source": "./plugins/ccam-config",
+      "description": "Audit and govern your Claude Code configuration and file-based memory via the Agent Monitor Config Explorer API — skills, subagents, commands, MCP servers, hooks, settings, and the per-project memory store. Surfaces sprawl, duplication, risky hooks, and stale facts, all read through the dashboard at http://localhost:4820.",
+      "tags": ["config", "memory", "governance", "mcp"]
+    },
+    {
+      "name": "ccam-cost-guard",
+      "source": "./plugins/ccam-cost-guard",
+      "description": "Budget tracking, spend forecasting, and cost-threshold alerts for Claude Code usage via the Agent Monitor pricing engine. Watches spend against a target budget, projects month-end cost from the daily trend, surfaces the priciest sessions, estimates savings from cheaper-model routing, and wires up cost alert rules — all backed by the dashboard at http://localhost:4820.",
+      "tags": ["budget", "cost", "forecast", "alerts"]
+    },
+    {
+      "name": "ccam-dashboard",
+      "source": "./plugins/ccam-dashboard",
+      "description": "Direct MCP integration with the Claude Code Agent Monitor dashboard — real-time session data access, quick stats, and dashboard health monitoring via Model Context Protocol.",
+      "tags": ["dashboard", "status", "mcp", "connector"]
+    },
+    {
+      "name": "ccam-devtools",
+      "source": "./plugins/ccam-devtools",
+      "description": "Developer tools for Claude Code Agent Monitor — session debugging, hook diagnostics, data export, and system health checks for maintaining a healthy monitoring setup.",
+      "tags": ["devtools", "debug", "diagnostics", "export"]
+    },
+    {
+      "name": "ccam-insights",
+      "source": "./plugins/ccam-insights",
+      "description": "AI-powered insights for Claude Code — pattern detection, anomaly alerting, optimization recommendations, and session comparison using Agent Monitor analytics.",
+      "tags": ["insights", "patterns", "anomaly", "optimization"]
+    },
+    {
+      "name": "ccam-integrations",
+      "source": "./plugins/ccam-integrations",
+      "description": "Manage CCAM alert rules, universal webhook providers, browser push notifications, and SSH Remote Data Sources with explicit mutation and external-send confirmation.",
+      "tags": ["alerts", "webhooks", "push", "remote-sources", "ssh", "integrations"]
+    },
+    {
+      "name": "ccam-platform",
+      "source": "./plugins/ccam-platform",
+      "description": "Administer CCAM's Claude Code and Codex configuration explorers, provider-aware history import, backup restore, hook installation, home directories, updates, and MCP server.",
+      "tags": ["claude-code", "codex", "config", "hooks", "import", "backup"]
+    },
+    {
+      "name": "ccam-productivity",
+      "source": "./plugins/ccam-productivity",
+      "description": "Productivity workflows for Claude Code — daily standups, weekly reports, sprint summaries, and intelligent workflow optimization powered by Agent Monitor session data.",
+      "tags": ["productivity", "reports", "workflows", "standup"]
+    },
+    {
+      "name": "ccam-quality",
+      "source": "./plugins/ccam-quality",
+      "description": "Reliability and error monitoring for Claude Code sessions — surfaces APIError events, hook delivery failures, tool-failure ratios (PreToolUse/PostToolUse gaps), and SLO tracking with error-budget reporting, all derived from the Claude Code Agent Monitor event stream at http://localhost:4820.",
+      "tags": ["reliability", "errors", "slo", "quality"]
+    },
+    {
+      "name": "ccam-reports",
+      "source": "./plugins/ccam-reports",
+      "description": "Generate stakeholder-ready CCAM reports from local session, cost, reliability, and workflow data with explicit scope, evidence, and export-friendly Markdown.",
+      "tags": ["reports", "executive-summary", "cost", "reliability", "workflows", "ccam"]
+    },
+    {
+      "name": "ccam-runner",
+      "source": "./plugins/ccam-runner",
+      "description": "Operate dashboard-launched Claude Code and Codex runs with safe launch, follow-up, stop, resume, model discovery, and persistent run-history workflows.",
+      "tags": ["claude-code", "codex", "run", "launcher", "resume", "agents"]
+    },
+    {
+      "name": "ccam-sessions",
+      "source": "./plugins/ccam-sessions",
+      "description": "Search, inspect, replay, and manage Claude Code sessions tracked by the Agent Monitor dashboard — find sessions by project, model, status, or date; reconstruct event timelines; walk transcripts turn-by-turn; roll up activity per working directory; and identify stale or empty sessions before cleanup.",
+      "tags": ["sessions", "search", "transcript", "replay"]
+    },
+    {
+      "name": "ccam-workflows",
+      "source": "./plugins/ccam-workflows",
+      "description": "Analyze multi-agent orchestration and Workflow-tool fleet runs — DAGs, delegation, concurrency, error propagation, and effectiveness — via the Agent Monitor workflow intelligence API at http://localhost:4820. Maps parent→child subagent edges, scores model delegation and subagent success, surfaces concurrency lanes and serialization bottlenecks, and traces error cascades by agent depth.",
+      "tags": ["workflows", "orchestration", "subagents", "fleet"]
+    }
+  ]
+}

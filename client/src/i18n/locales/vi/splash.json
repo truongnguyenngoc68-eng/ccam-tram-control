@@ -1,0 +1,122 @@
+{
+  "greeting": {
+    "morning": "Chào buổi sáng",
+    "afternoon": "Chào buổi chiều",
+    "evening": "Chào buổi tối",
+    "night": "Đêm đã khuya"
+  },
+  "tagline": "Mọi điều agent của bạn làm đều không ẩn trong bóng tối.",
+  "sub1": "Quan sát thời gian thực cho phiên Claude Code, Cursor và Codex.",
+  "sub2": "Token, công cụ, chi phí và workflow, tất cả trực tiếp.",
+  "brand": "Giám sát Claude Code",
+  "provider": {
+    "title": "Bạn muốn theo dõi gì?",
+    "description": "Chọn dữ liệu hiển thị trên toàn bộ bảng điều khiển. Bạn có thể đổi lại trong Cài đặt.",
+    "claude": {
+      "description": "Theo dõi sẵn Claude Code cùng phiên, agent, lịch sử và chi phí Cursor."
+    },
+    "codex": {
+      "description": "Phiên Codex, mức dùng token GPT và chi phí."
+    },
+    "both": {
+      "label": "Cả hai",
+      "description": "Tất cả phiên Claude Code, Cursor và Codex, mức sử dụng và chi phí."
+    },
+    "beta": "Beta",
+    "continue": "Tiếp tục đến bảng điều khiển"
+  },
+  "hookGate": {
+    "kicker": "Theo dõi trực tiếp",
+    "title": "Thiết lập giám sát trực tiếp",
+    "description": "Chỉ cài hook cục bộ gọn nhẹ cho những nhà cung cấp đã chọn còn thiếu hook.",
+    "selectedProviders": "Nhà cung cấp vẫn cần hook",
+    "realTime": "Hook gửi sự kiện vòng đời đến bảng điều khiển cục bộ này theo thời gian thực. Dữ liệu vẫn ở trên máy của bạn.",
+    "checking": "Đang kiểm tra cấu hình hook hiện có...",
+    "installed": "Hook đã được cài và sẵn sàng để giám sát trực tiếp",
+    "existing": "Đã phát hiện hook bảng điều khiển hiện có",
+    "ready": "Sẵn sàng cài các hook đã chọn",
+    "overrideWarning": "Một nguồn đã chọn đã có hook bảng điều khiển. Cài đặt chỉ làm mới các mục của bảng điều khiển. Các hook khác của bạn vẫn được giữ nguyên.",
+    "output": "Kết quả cài đặt",
+    "failure": "Không thể cài tất cả hook đã chọn. Hãy xem kết quả, sau đó thử lại hoặc tiếp tục nếu bạn đã hoàn tất thiết lập theo cách khác.",
+    "checkFailed": "Không thể kiểm tra cấu hình hook hiện tại. Bạn vẫn có thể cài các hook đã chọn.",
+    "preserveNote": "Chỉ các hook của bảng điều khiển được quản lý. Các hook khác của bạn không thay đổi.",
+    "alreadyInstalled": "Tôi đã cài hook",
+    "install": "Cài hook",
+    "installing": "Đang cài hook...",
+    "continue": "Tiếp tục đến bảng điều khiển"
+  },
+  "taglines": [
+    "Mọi điều agent của bạn làm đều không ẩn trong bóng tối.",
+    "Thấy rõ từng bước đi của agent.",
+    "Agent của bạn, hoàn toàn trong tầm quan sát.",
+    "Từng token, công cụ và lượt xử lý — hiện rõ trước mắt.",
+    "Nhìn cả đội agent của bạn suy nghĩ.",
+    "Nơi mọi phiên Claude Code trở nên rõ ràng.",
+    "Đôi mắt thời gian thực dõi theo từng agent.",
+    "Từ prompt đến kết quả, tất cả đều được ghi lại.",
+    "Phòng điều khiển cho các AI agent của bạn.",
+    "Từng subagent đều được nắm rõ.",
+    "Biết chính xác agent của bạn tốn bao nhiêu.",
+    "Workflow agentic của bạn, trở nên dễ đọc.",
+    "Quan sát. Đo lường. Tối ưu.",
+    "Trung tâm điều hành cho Claude Code.",
+    "Biến mớ hỗn loạn của agent thành bức tranh rõ ràng.",
+    "Bằng chứng cho mọi lần chạy."
+  ],
+  "subs": [
+    [
+      "Khả năng quan sát thời gian thực cho mọi phiên Claude Code.",
+      "Token, công cụ, chi phí và workflow, tất cả trực tiếp."
+    ],
+    [
+      "Phiên, agent và sự kiện trực tiếp ngay khi diễn ra.",
+      "Phân tích token và chi phí theo từng model, không phải đoán mò."
+    ],
+    [
+      "Truy vết mọi lời gọi công cụ trên khắp cây agent của bạn.",
+      "Phát hiện lượt chậm, model tốn kém, lỗi âm thầm."
+    ],
+    ["Hook truyền thẳng tới một dashboard cục bộ.", "Dữ liệu của bạn không bao giờ rời khỏi máy."],
+    [
+      "Nhìn các orchestrator giao việc cho subagent.",
+      "DAG, xử lý đồng thời và lan truyền lỗi, được trực quan hóa."
+    ],
+    [
+      "Theo dõi chi phí đến từng token cache.",
+      "Giá theo từng model với mốc cơ sở nhận biết compaction."
+    ],
+    [
+      "Mọi phiên, agent và sự kiện gom về một nơi.",
+      "Tìm kiếm, phát lại và kiểm tra mà không cần rời khỏi phòng."
+    ],
+    [
+      "Từ SessionStart đến SessionEnd, được ghi lại trọn vẹn.",
+      "Bao gồm cả compaction, lỗi API và thời lượng từng lượt."
+    ],
+    [
+      "Biết model nào đã làm gì, và tốn bao nhiêu.",
+      "Subagent được tính theo giá riêng, không phải giá của orchestrator."
+    ],
+    [
+      "Đội workflow và các agent bên trong, được phơi bày.",
+      "Kể cả những lần chạy chẳng bao giờ kích hoạt một hook nào."
+    ],
+    [
+      "Cửa sổ cục bộ ưu tiên nhìn vào agent của bạn.",
+      "Không cloud, không tài khoản, không telemetry."
+    ],
+    [
+      "Đo năng suất, không phải cảm tính.",
+      "Tốc độ, hiệu quả cache và mức hữu dụng của công cụ, được chấm điểm."
+    ],
+    [
+      "Bắt bất thường trước khi hóa đơn bắt được.",
+      "Chi phí ngoại lệ và đột biến token, được cảnh báo sớm."
+    ],
+    [
+      "Cấu hình Claude Code của bạn, được lập bản đồ đầy đủ.",
+      "Skill, agent, hook, MCP và bộ nhớ chỉ trong một cái nhìn."
+    ]
+  ],
+  "paletteHint": "Mẹo — nhấn {{chord}} bất cứ lúc nào để tới bất kỳ trang, phiên hay cài đặt nào."
+}

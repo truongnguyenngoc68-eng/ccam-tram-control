@@ -1,0 +1,787 @@
+/**
+ * @file screens.snapshot.test.tsx
+ * @description Render snapshot tests for every routed screen. Each page is
+ * rendered inside a MemoryRouter with the API layer mocked to a deterministic
+ * loaded-empty state (empty collections + zeroed scalars) so snapshots capture
+ * real structure / layout / i18n without noisy chart DOM or live data. The
+ * system clock and timezone are pinned so any relative/absolute timestamps are
+ * stable across machines and CI.
+ * @author Son Nguyen <hoangson091104@gmail.com>
+ */
+/* =============================================================================
+ * TEST_CONTRACT_GUIDE — executable-specification map (documentation only)
+ * =============================================================================
+ * Path: `client/src/pages/__tests__/screens.snapshot.test.tsx`
+ *
+ * Scope
+ * Render snapshot tests for every routed screen. Each page is rendered inside a MemoryRouter with
+ * the API layer mocked to a deterministic loaded-empty state (empty collections + zeroed scalars) so
+ * snapshots capture real structure / layout / i18n without noisy chart DOM or live data. The system
+ * clock and timezone are pinned so any relative/absolute timestamps are stable across machines and
+ * CI.
+ *
+ * Subjects and collaborators
+ * - `../Dashboard` — local module imported by this suite.
+ * - `../KanbanBoard` — local module imported by this suite.
+ * - `../Sessions` — local module imported by this suite.
+ * - `../SessionDetail` — local module imported by this suite.
+ * - `../ActivityFeed` — local module imported by this suite.
+ * - `../Analytics` — local module imported by this suite.
+ * - `../Workflows` — local module imported by this suite.
+ * - `../CcConfig` — local module imported by this suite.
+ * - `../Run` — local module imported by this suite.
+ * - `../Settings` — local module imported by this suite.
+ * - `../NotFound` — local module imported by this suite.
+ * - `../../lib/api` — local module imported by this suite.
+ *
+ * Harness and isolation
+ * - Vitest supplies suite lifecycle, spies, mocks, and assertions; every case must be
+ *   order-independent.
+ * - React Testing Library drives the rendered UI through accessible roles, labels, and user-visible
+ *   text.
+ * - `MemoryRouter` provides deterministic navigation without coupling the suite to browser history.
+ * - Only `Date` is faked: the clock is pinned for stable timestamps, while timeout timers remain real
+ *   so `settle()` can flush queued renders.
+ * - Realtime inputs are simulated locally so connection timing and event ordering stay reproducible.
+ * - Snapshots protect deliberate presentation structure and must be reviewed as UI contracts, not
+ *   refreshed blindly.
+ * - Mock boundary: `../../lib/api`.
+ * - Mock boundary: `../../lib/eventBus`.
+ * - Mock boundary: `../../lib/push`.
+ *
+ * Suite groups
+ * - `screen snapshots`
+ *
+ * Protected behavior
+ * - Dashboard
+ * - Dashboard requests task progress for active agent cards
+ * - Kanban board
+ * - Sessions
+ * - Sessions requests and safely renders the transient Codex startup row
+ * - Session detail
+ * - Activity feed
+ * - Analytics
+ * - Workflows
+ * - Claude Config
+ * - Run
+ * - Settings
+ * - scrolls to the section a deep link names
+ * - ignores a malformed hash instead of throwing
+ * - aligns GPT pricing controls with Claude and keeps rate caveats in the tooltip
+ * - Not found
+ *
+ * Maintenance rules
+ * - Keep assertions at observable boundaries: rendered output, public return values, emitted events, or
+ *   wire payloads.
+ * - When behavior changes intentionally, update the matching case title and this map in the same
+ *   review.
+ * - Prefer one reason for failure per case; shared setup may remove noise but must not hide the state
+ *   under test.
+ * - Reset spies, fake timers, storage, and singleton subscriptions so reruns and shuffled execution
+ *   remain stable.
+ * - Add regression coverage beside the narrowest existing group that expresses the affected user or API
+ *   contract.
+ * - Query the UI by role or accessible name first; test IDs are reserved for structure with no semantic
+ *   selector.
+ * - Keep client fixtures aligned with `lib/types.ts` and server response shapes so mocks do not mask
+ *   contract drift.
+ *
+ * Verification
+ * - Run `npm run test:client` and `npm run typecheck:client` after changing this area.
+ * - The repository-wide `npm run verify` gate also checks headers, formatting, server tests, and client
+ *   tests.
+ * ============================================================================= */
+
+// Pin timezone before anything reads it, so date formatting is machine-stable
+// (referenced via globalThis so the browser-targeted tsconfig doesn't need node types).
+const nodeProcess = (
+  globalThis as unknown as { process?: { env: Record<string, string | undefined> } }
+).process;
+if (nodeProcess) nodeProcess.env.TZ = "UTC";
+
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import type { ReactNode } from "react";
+import { render, act, fireEvent, screen, within } from "@testing-library/react";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router";
+import i18n from "i18next";
+
+// ── Mock the API layer with deterministic, crash-safe empty fixtures ──────────
+// Keep the module's other named exports (RUN_EFFORT_CHOICES, etc.) real and
+// override only `api`.
+vi.mock("../../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const r = (value: unknown) => vi.fn().mockResolvedValue(value);
+  const items = { items: [] };
+  const cost = {
+    total_cost: 0,
+    breakdown: [],
+    daily_costs: [],
+    feature_costs: {},
+    unpriced_models: [],
+  };
+  const emptyWorkflow = {
+    stats: {
+      totalSessions: 0,
+      totalAgents: 0,
+      totalSubagents: 0,
+      avgSubagents: 0,
+      successRate: 0,
+      avgDepth: 0,
+      avgDurationSec: 0,
+      totalCompactions: 0,
+      avgCompactions: 0,
+      topFlow: null,
+    },
+    orchestration: {
+      sessionCount: 0,
+      mainCount: 0,
+      subagentTypes: [],
+      edges: [],
+      outcomes: [],
+      compactions: { total: 0, sessions: 0 },
+    },
+    toolFlow: { transitions: [], toolCounts: [] },
+    effectiveness: [],
+    patterns: { patterns: [], soloSessionCount: 0, soloPercentage: 0 },
+    modelDelegation: { mainModels: [], subagentModels: [], tokensByModel: [] },
+    errorPropagation: {
+      byDepth: [],
+      byType: [],
+      eventErrors: [],
+      sessionsWithErrors: 0,
+      totalSessions: 0,
+      errorRate: 0,
+    },
+    concurrency: { aggregateLanes: [] },
+    complexity: [],
+    compaction: {
+      totalCompactions: 0,
+      tokensRecovered: 0,
+      perSession: [],
+      sessionsWithCompactions: 0,
+      totalSessions: 0,
+    },
+    cooccurrence: [],
+  };
+  const analytics = {
+    tokens: { total_input: 0, total_output: 0, total_cache_read: 0, total_cache_write: 0 },
+    tool_usage: [],
+    daily_events: [],
+    daily_sessions: [],
+    agent_types: [],
+    event_types: [],
+    avg_events_per_session: 0,
+    total_subagents: 0,
+    overview: {
+      total_sessions: 0,
+      active_sessions: 0,
+      active_agents: 0,
+      total_agents: 0,
+      total_events: 0,
+    },
+    agents_by_status: {},
+    sessions_by_status: {},
+  };
+  const settingsInfo = {
+    db: {
+      path: "/tmp/test.db",
+      size: 0,
+      counts: {},
+      pragmas: {
+        journal_mode: "wal",
+        synchronous: 1,
+        auto_vacuum: 0,
+        encoding: "UTF-8",
+        foreign_keys: 1,
+        busy_timeout: 5000,
+      },
+      load_stats: { m5: 0, m15: 0, h1: 0 },
+    },
+    hooks: { installed: true, path: "/tmp/settings.json", hooks: {} },
+    server: {
+      uptime: 0,
+      node_version: "v22.0.0",
+      platform: "linux",
+      ws_connections: 0,
+      memory: { rss: 0, heapTotal: 0, heapUsed: 0, external: 0 },
+      cpu_load: [0, 0, 0],
+      arch: "x64",
+      total_mem: 0,
+      free_mem: 0,
+      cpus: 1,
+    },
+    transcript_cache: { size: 0, maxSize: 100, hits: 0, misses: 0, keys: [] },
+  };
+  const session = {
+    id: "sess-1",
+    name: "Test Session",
+    status: "active",
+    cwd: "/test",
+    model: "claude-opus-4-6",
+    started_at: "2026-06-10T12:00:00.000Z",
+    ended_at: null,
+    metadata: null,
+  };
+  const stats = {
+    total_sessions: 0,
+    active_sessions: 0,
+    active_agents: 0,
+    total_agents: 0,
+    total_events: 0,
+    events_today: 0,
+    ws_connections: 0,
+    agents_by_status: {},
+    sessions_by_status: {},
+  };
+
+  const sampleWorkflowRun = {
+    run_id: "wf_sample1",
+    session_id: "sess-1",
+    task_id: "task-1",
+    name: "review-changes",
+    status: "completed",
+    default_model: "claude-opus-4-6",
+    started_at: "2026-06-10T12:30:00.000Z",
+    ended_at: "2026-06-10T12:35:00.000Z",
+    duration_ms: 300000,
+    agent_count: 2,
+    total_tokens: 48000,
+    total_tool_calls: 9,
+    phases: [{ title: "Review" }, { title: "Verify" }],
+    progress: [
+      { type: "workflow_phase", index: 1, title: "Review" },
+      { type: "workflow_phase", index: 2, title: "Verify" },
+      {
+        type: "workflow_agent",
+        agentId: "a1",
+        agentType: "reviewer",
+        state: "done",
+        label: "review:bugs",
+        phaseTitle: "Review",
+        tokens: 22000,
+        toolCalls: 5,
+        durationMs: 120000,
+        lastToolName: "Read",
+        resultPreview: "Found 3 issues",
+      },
+      {
+        type: "workflow_agent",
+        agentId: "a2",
+        agentType: "verifier",
+        state: "done",
+        label: "verify:bugs",
+        phaseTitle: "Verify",
+        tokens: 26000,
+        toolCalls: 4,
+        durationMs: 180000,
+        lastToolName: "Bash",
+        resultPreview: "All confirmed",
+      },
+    ],
+    script_path: null,
+    journal_path: "/x/wf_sample1.json",
+    source: "journal",
+    created_at: "2026-06-10T12:30:00.000Z",
+    updated_at: "2026-06-10T12:35:00.000Z",
+  };
+
+  return {
+    ...actual,
+    api: {
+      stats: { get: r(stats), facets: r({ cwds: [] }) },
+      sessions: {
+        list: r({ sessions: [], total: 0, limit: 50, offset: 0 }),
+        facets: r({ cwds: [], sources: ["local"] }),
+        get: r({ session, agents: [], events: [], workflows: [sampleWorkflowRun] }),
+        stats: r({
+          session_id: "sess-1",
+          total_events: 0,
+          events_by_type: [],
+          tools_used: [],
+          error_count: 0,
+          first_event_at: null,
+          last_event_at: null,
+          agents: { total: 0, main: 0, subagent: 0, compaction: 0, by_status: {} },
+          subagent_types: [],
+          tokens: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+        }),
+        transcripts: r({ transcripts: [] }),
+        transcript: r({ messages: [], session_id: "sess-1" }),
+      },
+      agents: { list: r({ agents: [] }) },
+      remoteSources: {
+        list: r({ sources: [] }),
+        create: r({ source: {} }),
+        update: r({ source: {} }),
+        remove: r({ ok: true, purged: 0 }),
+        test: r({ ok: true, message: "" }),
+        sync: r({ ok: true }),
+      },
+      events: {
+        list: r({ events: [], total: 0, limit: 50, offset: 0 }),
+        facets: r({ event_types: [], tool_names: [] }),
+      },
+      analytics: { get: r(analytics) },
+      workflows: {
+        get: r(emptyWorkflow),
+        session: r({}),
+        runs: r({
+          runs: [sampleWorkflowRun],
+          total: 1,
+          counts: { completed: 1 },
+          limit: 200,
+          offset: 0,
+        }),
+        run: r({ workflow: sampleWorkflowRun, agents: [], events: [] }),
+      },
+      pricing: {
+        list: r({ pricing: [] }),
+        listCursor: r({ pricing: [] }),
+        listGpt: r({ pricing: [] }),
+        upsert: r({ pricing: {} }),
+        upsertCursor: r({ pricing: {} }),
+        upsertGpt: r({ pricing: {} }),
+        delete: r({ ok: true }),
+        deleteCursor: r({ ok: true }),
+        deleteGpt: r({ ok: true }),
+        totalCost: r(cost),
+        sessionCost: r(cost),
+      },
+      settings: {
+        info: r(settingsInfo),
+        claudeHome: {
+          get: r({ claude_home: "/home/test/.claude" }),
+          set: r({ ok: true, claude_home: "/home/test/.claude" }),
+        },
+        codexHome: {
+          get: r({ codex_home: "/home/test/.codex" }),
+          set: r({ ok: true, codex_home: "/home/test/.codex" }),
+        },
+        clearData: r({ ok: true, cleared: {} }),
+        reimport: r({ ok: true, imported: 0, skipped: 0, errors: 0 }),
+        reinstallHooks: r({ ok: true, hooks: { installed: true, hooks: {} } }),
+        resetPricing: r({
+          ok: true,
+          provider: "both",
+          pricing: [],
+          cursor_pricing: [],
+          gpt_pricing: [],
+        }),
+        exportData: () => "/api/settings/export",
+        cleanup: r({
+          ok: true,
+          abandoned: 0,
+          purged_sessions: 0,
+          purged_events: 0,
+          purged_agents: 0,
+        }),
+      },
+      import: {
+        guide: r({
+          platform: "linux",
+          default_projects_dir: "/home/test/.claude/projects",
+          default_projects_dir_display: "~/.claude/projects",
+          default_projects_dir_exists: true,
+          default_projects_dir_stats: { projects: 0, jsonl_files: 0 },
+          archive_command: "tar",
+          supported_extensions: [".jsonl"],
+          max_upload_bytes: 1000000,
+          max_upload_files: 10,
+          steps: [],
+        }),
+        rescan: r({}),
+        scanPath: r({}),
+      },
+      ccConfig: {
+        overview: r({
+          roots: {
+            claudeHome: "/home/test/.claude",
+            projectClaudeDir: "/test/.claude",
+            projectRoot: "/test",
+            claudeJson: "/home/test/.claude.json",
+          },
+          counts: {
+            skills: { user: 0, project: 0 },
+            agents: { user: 0, project: 0 },
+            commands: { user: 0, project: 0 },
+            outputStyles: { user: 0, project: 0 },
+            plugins: 0,
+            pluginsEnabled: 0,
+            pluginsDisabled: 0,
+            marketplaces: 0,
+            keybindings: 0,
+            mcpServers: { user: 0, project: 0 },
+            hooks: {},
+            memory: 0,
+            settingsFiles: 0,
+          },
+        }),
+        skills: r(items),
+        agents: r(items),
+        commands: r(items),
+        outputStyles: r(items),
+        plugins: r({ manifestPath: "", manifestExists: false, plugins: [] }),
+        mcp: r({ servers: [], items: [] }),
+        hooks: r(items),
+        settings: r(items),
+        memory: r(items),
+        file: r({
+          scope: "user",
+          name: "x",
+          path: "/x",
+          size: 0,
+          mtime: 0,
+          truncated: false,
+          frontmatter: {},
+          preview: "",
+          content: "",
+        }),
+        write: r({ ok: true }),
+        delete: r({ ok: true }),
+        marketplaces: r({ marketplaces: [], items: [] }),
+        keybindings: r({ items: [], bindings: [] }),
+        statusline: r({ configured: false }),
+        hookScripts: r({ items: [], scripts: [] }),
+        backups: r({ items: [] }),
+      },
+      run: {
+        list: r({ runs: [], items: [] }),
+        history: r({ items: [] }),
+        binary: r({ found: true, path: "/usr/bin/claude" }),
+        cwds: r({ items: [] }),
+        files: r({ items: [] }),
+        start: r({ id: "run-1", status: "running" }),
+        get: r({ id: "run-1", status: "running", messages: [], envelopes: [] }),
+        send: r({ messageId: "m-1" }),
+        kill: r({ ok: true }),
+      },
+      alerts: {
+        list: r({ alerts: [], total: 0, unacked: 0, limit: 50, offset: 0 }),
+        ack: r({ alert: {} }),
+        ackAll: r({ ok: true, acknowledged: 0 }),
+        rules: {
+          list: r({ rules: [] }),
+          create: r({ rule: {} }),
+          update: r({ rule: {} }),
+          remove: r({ ok: true }),
+        },
+      },
+      webhooks: {
+        list: r({ targets: [] }),
+        providers: r({ providers: [] }),
+        create: r({ target: {} }),
+        update: r({ target: {} }),
+        remove: r({ ok: true }),
+        test: r({ ok: true, status: 200, attempts: 1, error: null }),
+        deliveries: r({ deliveries: [], limit: 20, offset: 0 }),
+      },
+      updates: { check: r({ behind: 0, ahead: 0, current: "", upstream: "" }), status: r({}) },
+    },
+  };
+});
+
+// eventBus: no-op pub/sub so pages mount without a live socket. onConnection +
+// connected back the useSyncExternalStore(eventBus.onConnection, …) reads.
+vi.mock("../../lib/eventBus", () => ({
+  eventBus: {
+    subscribe: () => () => {},
+    publish: () => {},
+    onConnection: () => () => {},
+    connected: true,
+    setConnected: () => {},
+  },
+}));
+
+// push notifications: avoid real service-worker / Notification calls.
+vi.mock("../../lib/push", () => ({
+  subscribeToPush: vi.fn().mockResolvedValue(undefined),
+  unsubscribeFromPush: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Page components (imported after the mocks above; vi.mock is hoisted).
+import { Dashboard } from "../Dashboard";
+import { KanbanBoard } from "../KanbanBoard";
+import { Sessions } from "../Sessions";
+import { SessionDetail } from "../SessionDetail";
+import { ActivityFeed } from "../ActivityFeed";
+import { Analytics } from "../Analytics";
+import { Workflows } from "../Workflows";
+import { CcConfig } from "../CcConfig";
+import { Run } from "../Run";
+import { Settings } from "../Settings";
+import { NotFound } from "../NotFound";
+import { api } from "../../lib/api";
+
+// jsdom lacks these browser APIs that chart / responsive components rely on.
+class ObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return [];
+  }
+}
+globalThis.ResizeObserver =
+  globalThis.ResizeObserver || (ObserverStub as unknown as typeof ResizeObserver);
+globalThis.IntersectionObserver =
+  globalThis.IntersectionObserver || (ObserverStub as unknown as typeof IntersectionObserver);
+if (!window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    }) as unknown as MediaQueryList;
+}
+for (const fn of ["scrollIntoView", "scrollBy", "scrollTo"] as const) {
+  if (!(Element.prototype as unknown as Record<string, unknown>)[fn]) {
+    (Element.prototype as unknown as Record<string, unknown>)[fn] = function () {};
+  }
+}
+
+// Flush pending promises (mocked API resolves) + effects so the loaded state
+// is rendered before snapshotting.
+async function settle() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+async function snapshot(ui: ReactNode, route = "/") {
+  const { container } = render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>);
+  await settle();
+  expect(container).toMatchSnapshot();
+}
+
+function LocationProbe() {
+  return <span data-testid="location">{useLocation().pathname}</span>;
+}
+
+beforeAll(() => {
+  // Fake only Date so relative/absolute times are deterministic; leave timers
+  // real so setTimeout-based flushing in settle() still works.
+  vi.useFakeTimers({ now: new Date("2026-06-10T13:00:00.000Z"), toFake: ["Date"] });
+});
+
+afterAll(() => {
+  vi.useRealTimers();
+});
+
+beforeEach(() => {
+  i18n.changeLanguage("en");
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("screen snapshots", () => {
+  it("Dashboard", async () => {
+    await snapshot(<Dashboard />, "/");
+  });
+  it("Dashboard requests task progress for active agent cards", async () => {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <Dashboard />
+      </MemoryRouter>
+    );
+    await settle();
+
+    expect(vi.mocked(api.sessions.list)).toHaveBeenCalledWith({
+      status: "active",
+      limit: 100,
+      include_transient: true,
+      include_task_progress: true,
+    });
+  });
+  it("Kanban board", async () => {
+    await snapshot(<KanbanBoard />, "/kanban");
+  });
+  it("Sessions", async () => {
+    await snapshot(<Sessions />, "/sessions");
+  });
+  it("Sessions requests and safely renders the transient Codex startup row", async () => {
+    const transient = {
+      id: "codex-process:4312:abc123",
+      name: "Codex session",
+      status: "active" as const,
+      cwd: "/workspace/pre-identity",
+      model: null,
+      started_at: "2026-06-10T12:59:00.000Z",
+      ended_at: null,
+      metadata: JSON.stringify({
+        transient: true,
+        transient_process: true,
+        pre_identity_process: true,
+      }),
+      provider: "codex" as const,
+      source: "local",
+      agent_count: 1,
+      last_activity: "2026-06-10T12:59:00.000Z",
+      cost: 0,
+      awaiting_input_since: "2026-06-10T12:59:00.000Z",
+      awaiting_reason: "session_start",
+    };
+    vi.mocked(api.sessions.list).mockResolvedValueOnce({
+      sessions: [transient],
+      total: 0,
+      limit: 10,
+      offset: 0,
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <Sessions />
+        <LocationProbe />
+      </MemoryRouter>
+    );
+    await settle();
+
+    expect(vi.mocked(api.sessions.list)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include_transient: true,
+        include_task_progress: true,
+        limit: 10,
+        offset: 0,
+      })
+    );
+    expect(screen.getByText("Codex session")).toBeVisible();
+    expect(screen.getByText("1 session recorded")).toBeVisible();
+    fireEvent.click(screen.getByText("Codex session").closest("tr")!);
+    expect(screen.getByTestId("location")).toHaveTextContent("/sessions");
+  });
+  it("Session detail", async () => {
+    await snapshot(
+      <Routes>
+        <Route path="/sessions/:id" element={<SessionDetail />} />
+      </Routes>,
+      "/sessions/sess-1"
+    );
+  });
+  it("Activity feed", async () => {
+    await snapshot(<ActivityFeed />, "/activity");
+  });
+  it("Analytics", async () => {
+    await snapshot(<Analytics />, "/analytics");
+  });
+  it("Workflows", async () => {
+    await snapshot(<Workflows />, "/workflows");
+  });
+  it("Claude Config", async () => {
+    await snapshot(<CcConfig />, "/cc-config");
+  });
+  it("Run", async () => {
+    await snapshot(<Run />, "/run");
+  });
+  it("Settings", async () => {
+    await snapshot(<Settings />, "/settings");
+  });
+  it("scrolls to the section a deep link names", async () => {
+    // `/settings#<section>` is how the command palette reaches an individual
+    // section; React Router does not resolve a hash on its own.
+    const scrolled: string[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      if (this.id) scrolled.push(this.id);
+    };
+    try {
+      render(
+        <MemoryRouter initialEntries={["/settings#alerts"]}>
+          <Settings />
+        </MemoryRouter>
+      );
+      await settle();
+      await act(async () => {
+        // The scroll is deferred a frame so the target has been laid out.
+        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      });
+      expect(scrolled).toContain("alerts");
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+  it("ignores a malformed hash instead of throwing", async () => {
+    // `decodeURIComponent("%zz")` raises URIError. A link mangled in transit is
+    // not worth taking the Settings page down for.
+    render(
+      <MemoryRouter initialEntries={["/settings#%zz"]}>
+        <Settings />
+      </MemoryRouter>
+    );
+    await settle();
+    expect(document.getElementById("alerts")).not.toBeNull();
+  });
+  it("aligns GPT pricing controls with Claude and keeps rate caveats in the tooltip", async () => {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Settings />
+      </MemoryRouter>
+    );
+    await settle();
+
+    const claudeSection = document.getElementById("claude-pricing");
+    const gptSection = document.getElementById("gpt-pricing");
+    expect(claudeSection).not.toBeNull();
+    expect(gptSection).not.toBeNull();
+    const claude = within(claudeSection as HTMLElement);
+    const gpt = within(gptSection as HTMLElement);
+    const claudeReset = claude.getByRole("button", { name: "Reset Defaults" });
+    const claudeAdd = claude.getByRole("button", { name: "Add Model" });
+    const gptReset = gpt.getByRole("button", { name: "Reset Defaults" });
+    const gptAdd = gpt.getByRole("button", { name: "Add Model" });
+    const subtitle = gpt.getByText(/Published OpenAI API rates.*USD per 1M tokens\./);
+
+    expect(gpt.getByRole("columnheader", { name: "Fast · Short ≤272K" })).toHaveAttribute(
+      "colspan",
+      "4"
+    );
+    expect(gpt.getByRole("columnheader", { name: "Fast · Long >272K" })).toHaveAttribute(
+      "colspan",
+      "4"
+    );
+    expect(gptReset.className).toBe(claudeReset.className);
+    expect(gptAdd.className).toBe(claudeAdd.className);
+    expect(
+      subtitle.compareDocumentPosition(gptReset) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      gptReset.compareDocumentPosition(gptAdd) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      gpt.queryByText(/An em dash means OpenAI does not publish that context or Fast-mode rate/)
+    ).not.toBeInTheDocument();
+
+    const infoButton = gpt.getByRole("button", { name: "How GPT pricing works" });
+    fireEvent.focus(infoButton);
+    expect(gpt.getByRole("tooltip")).toBeInTheDocument();
+    expect(gpt.getByText("Unpublished rates stay unpriced")).toBeInTheDocument();
+    expect(
+      gpt.getByText(/An em dash means OpenAI does not publish that context or Fast-mode rate/)
+    ).toBeInTheDocument();
+    fireEvent.blur(infoButton);
+    expect(gpt.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.click(gptReset);
+    expect(gpt.getByRole("button", { name: "Confirm Reset" })).toBeInTheDocument();
+    fireEvent.click(gpt.getByRole("button", { name: "Confirm Reset" }));
+    await settle();
+    expect(vi.mocked(api.settings.resetPricing)).toHaveBeenCalledWith("codex");
+    expect(screen.queryByText(/Every amount is USD per 1M tokens/)).not.toBeInTheDocument();
+  });
+  it("Not found", async () => {
+    await snapshot(<NotFound />, "/nope");
+  });
+});

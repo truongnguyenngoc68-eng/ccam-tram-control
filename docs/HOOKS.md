@@ -1,0 +1,918 @@
+# Hook System Integration Guide
+
+Comprehensive guide to integrating with Claude Code's hook system for real-time agent monitoring.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Hook Architecture](#hook-architecture)
+- [Hook Installation](#hook-installation)
+- [Hook Types](#hook-types)
+- [Hook Handler Implementation](#hook-handler-implementation)
+- [Event Processing](#event-processing)
+- [Error Handling](#error-handling)
+- [Performance Considerations](#performance-considerations)
+- [Testing Hooks](#testing-hooks)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Overview
+
+Claude Code provides a hook system that allows external tools to receive real-time events during agent execution. Agent Dashboard uses these hooks to capture session lifecycle, tool executions, and notifications.
+
+> **Cursor:** Cursor does not need to reach a tool hook before appearing. A filesystem watcher imports `~/.cursor/chats/*/<session>/meta.json` at `agent` startup and its `prompt_history.json` on submit; compatible hook envelopes and the later native transcript add tool/assistant detail. Startup and periodic scans still backfill sessions created while the dashboard was offline.
+
+```mermaid
+graph TB
+    subgraph "Claude Code Process"
+        CLI[Claude CLI]
+        Agent[Agent Execution]
+        Hooks[Hook System]
+    end
+    
+    subgraph "Hook Wiring (~/.claude/settings.json)"
+        SessionStart[SessionStart]
+        UserPromptSubmit[UserPromptSubmit]
+        PreTool[PreToolUse]
+        PostTool[PostToolUse]
+        Stop[Stop]
+        SubagentStop[SubagentStop]
+        Notification[Notification]
+        SessionEnd[SessionEnd]
+    end
+
+    subgraph "Hook Handler"
+        Handler[hook-handler.js]
+    end
+
+    subgraph "Dashboard Server"
+        API[Express Server<br/>:4820]
+    end
+
+    Agent --> Hooks
+    Hooks -->|stdin JSON| SessionStart
+    Hooks -->|stdin JSON| UserPromptSubmit
+    Hooks -->|stdin JSON| PreTool
+    Hooks -->|stdin JSON| PostTool
+    Hooks -->|stdin JSON| Stop
+    Hooks -->|stdin JSON| SubagentStop
+    Hooks -->|stdin JSON| Notification
+    Hooks -->|stdin JSON| SessionEnd
+
+    SessionStart -->|exec| Handler
+    UserPromptSubmit -->|exec| Handler
+    PreTool -->|exec| Handler
+    PostTool -->|exec| Handler
+    Stop -->|exec| Handler
+    SubagentStop -->|exec| Handler
+    Notification -->|exec| Handler
+    SessionEnd -->|exec| Handler
+    
+    Handler -->|HTTP POST| API
+    
+    style Hooks fill:#F59E0B
+    style Handler fill:#10B981
+    style API fill:#3B82F6
+```
+
+---
+
+## Hook Architecture
+
+### Hook Execution Flow
+
+```mermaid
+sequenceDiagram
+    participant Claude as Claude Code
+    participant HookScript as Hook Script<br/>(Python)
+    participant Handler as hook-handler.js
+    participant Server as Dashboard Server
+    participant DB as SQLite
+    participant WS as WebSocket
+    
+    Claude->>HookScript: Execute (stdin: JSON)
+    HookScript->>HookScript: Read stdin
+    HookScript->>Handler: exec node hook-handler.js
+    Handler->>Handler: Parse JSON
+    Handler->>Server: HTTP POST /hooks/{type}
+    Server->>DB: Insert/Update data
+    DB-->>Server: Success
+    Server->>WS: Broadcast event
+    WS-->>Server: Sent to clients
+    Server-->>Handler: 200 OK
+    Handler-->>HookScript: exit 0
+    HookScript-->>Claude: exit 0 (non-blocking)
+    
+    Note over Claude: Continues execution<br/>without waiting
+```
+
+> **Security:** the hook handler POSTs to the loopback dashboard (`127.0.0.1:<port>`).
+> The `/api/hooks` ingestion path is **exempt** from the optional `DASHBOARD_TOKEN`
+> gate — it is a local-only write — so hooks keep working without a token even when
+> one is configured for the rest of the API (GHSA-gr74-4xfh-6jw9).
+>
+> The remote-push routes in that namespace this does **not** describe are
+> [`POST /api/hooks/ingest-batch`](#remote-push-ingestion) and
+> `POST /api/hooks/ingest-transcript`. They are meant to be reachable from the
+> public internet and carry their own mandatory token instead of being exempt.
+
+### Hook System Characteristics
+
+**Design Principles:**
+
+```mermaid
+graph TB
+    subgraph "Hook System Goals"
+        NonBlocking[Non-Blocking<br/>Never block Claude Code]
+        FailSafe[Fail-Safe<br/>Errors don't stop execution]
+        FastExec[Fast Execution<br/>&lt; 100ms per hook]
+        Complete[Complete Data<br/>Capture all events]
+    end
+    
+    subgraph "Implementation"
+        Timeout[5s Timeout]
+        ErrorLog[Silent Error Logging]
+        Async[Async HTTP POST]
+        JSON[JSON Serialization]
+    end
+    
+    NonBlocking --> Timeout
+    FailSafe --> ErrorLog
+    FastExec --> Async
+    Complete --> JSON
+    
+    style NonBlocking fill:#10B981
+    style FailSafe fill:#10B981
+    style FastExec fill:#10B981
+```
+
+---
+
+## Hook Installation
+
+### Installation Script
+
+```bash
+# Install hooks
+npm run install-hooks
+```
+
+The installer is interactive: use arrow keys, <kbd>Space</kbd>, then <kbd>Enter</kbd> to select Claude Code, Codex (beta), or both. It starts with Claude Code selected. Existing dashboard hook entries are detected and warned about before replacement; unrelated entries remain untouched. The same multi-select is available from **Settings → Hook Configuration → Install hooks**.
+
+On a browser's first dashboard visit, select the provider data to display and the app opens a provider-locked live-monitoring setup gate. It checks the selected providers' hook state, warns before dashboard-owned entries are refreshed, installs through the same endpoint, and displays the command output. A user can explicitly confirm that hooks were already installed, but otherwise the dashboard continues only after the in-app installation completes.
+
+> [!IMPORTANT]
+> **Hooks are a host-side step.** Claude Code runs on your host, so the hook
+> command must reference a `hook-handler.js` path that exists on the **host**.
+
+### Remote and cloud hook delivery
+
+Hook handlers use localhost discovery by default. To forward live Claude Code or
+Codex events to a remote dashboard, configure the host that runs the agent:
+
+```bash
+export CCAM_DASHBOARD_URL=https://agent-monitor.example.com
+export CCAM_HOOK_TOKEN_FILE=/secure/path/hook-token
+```
+
+Non-loopback `CCAM_DASHBOARD_URL` values must use HTTPS and must provide
+`CCAM_HOOK_TOKEN` or `CCAM_HOOK_TOKEN_FILE`. The handler sends the credential as
+`x-ccam-hook-token`; the dashboard verifies it against
+`DASHBOARD_HOOK_TOKEN` or `DASHBOARD_HOOK_TOKEN_FILE` with constant-time token
+matching. The hook remains fail-safe and non-blocking: invalid configuration,
+connection failures, timeouts, or authentication failures never block Claude
+Code or Codex.
+
+The supplied Nginx edge returns `404` for `/api/hooks/*` by default. Remote hook
+ingestion is enabled explicitly by mounting
+`deployments/nginx/snippets/hooks-proxy.conf` and terminating TLS before Nginx.
+Use a hook token separate from the browser/dashboard token.
+
+### Remote push ingestion
+
+Hook forwarding above still requires the dashboard to be *reachable* from the
+machine running Claude Code or Codex. Remote push covers the opposite case: a
+roaming laptop behind NAT or a CGNAT'd home connection that the dashboard can
+never reach to pull from, and which therefore pushes its own session data.
+
+These are the only routes in the server intended to be reachable from the
+public internet, and they are **disabled until you configure them**:
+
+```bash
+REMOTE_PUSH_TOKEN=change-me-to-a-long-random-string
+# or
+REMOTE_PUSH_TOKEN_FILE=/run/ccam-secrets/remote-push-token
+```
+
+Unset, every request answers `503 REMOTE_PUSH_NOT_CONFIGURED`. The token is
+deliberately **separate** from `DASHBOARD_HOOK_TOKEN`: hardening the loopback
+hook routes must not open an internet-writable endpoint as a side effect. Send it
+as `Authorization: Bearer <token>` or `X-Dashboard-Token: <token>` — `?token=` is
+rejected, because a query-string credential on a public route ends up in access
+and proxy logs.
+
+`POST /api/hooks/ingest-batch` carries token buckets (each entry the bucket's **full current total**,
+like a transcript re-parse, not a delta), tool events, and turn durations,
+persisted as `RemoteToolEvent` and `RemoteTurn` events. Items dedup on
+`(session_id, event_type, uuid)` against committed rows and within the batch, so
+a resend is safe; the batch is capped at 1000 items (`413 BATCH_TOO_LARGE`); and
+a `session_id` already owned by a local or SSH-pulled session is refused per item
+(`SESSION_LOCALLY_OWNED`) so a push can never hijack it. Like every other hook
+path, partial failures stay non-fatal — the response is `200` with per-item
+`errors[]`.
+
+`POST /api/hooks/ingest-transcript` is the Claude-only companion for main and
+subagent JSONL. The session must first be registered as `remote_push` through
+`ingest-batch`. Chunks are canonical base64, capped at 4 MiB, and accepted only
+when `offset` equals the stored file size. Each file defaults to a 256 MiB cap,
+configurable through `REMOTE_TRANSCRIPT_MAX_FILE_MB`. Canonical path checks and
+no-follow file opening prevent a pre-existing symlink from redirecting writes
+outside the Claude projects root. The remote token is verified before the
+route's 8 MiB JSON parser reads the request body.
+
+On the final chunk of a pass, `sync: true` re-derives transcript metadata and
+imports subagents. It creates no `RemoteSync` event, does not reactivate a
+terminal session, and restores the original `sessions.updated_at` so inactivity
+alerts continue to measure real hook activity.
+
+Collectors may optionally supply `repo_remote_url`: inside `data` for
+`POST /api/hooks/event`, or at the top level for `POST /api/hooks/ingest-batch`.
+The server does not run Git to discover this field. The first non-empty sanitized
+remote wins, including when a later event supplies it for an existing session.
+URL/SCP userinfo, query strings, and fragments are removed; malformed URL-style
+values are discarded before persistence. Local hook envelopes stored in
+`events.data` use the sanitized value as well. For example,
+`git@example.internal:team/project.git` is retained as
+`example.internal:team/project.git`. Consumers can use this optional identity
+hint to match repositories across different working-directory paths.
+
+See [API.md → Remote Push Ingestion](API.md#remote-push-ingestion) for the full
+payload shape and [`server/README.md`](../server/README.md) for the route's
+implementation notes.
+> Run `npm run install-hooks` on the host — never inside a container. When run
+> inside Docker/Podman, the installer **refuses** and exits non-zero (issue
+> #193): a container-internal path written into a bind-mounted `~/.claude` would
+> break every host hook with `MODULE_NOT_FOUND`. The host handler POSTs to
+> `http://localhost:4820`, which a containerized dashboard already publishes.
+> (Escape hatch for running Claude Code *inside* the same container:
+> `CCAM_ALLOW_CONTAINER_HOOKS=1 npm run install-hooks`.)
+
+For Codex, the installer writes only this dashboard's lifecycle entries to `~/.codex/hooks.json`. Each entry runs `scripts/codex-hook-handler.js`, which immediately POSTs the rollout path — or the session/thread id every Codex hook carries — to `POST /api/hooks/codex` and exits. A rollout is **not** required: the thread id alone identifies the session, and only a payload carrying neither is answered as an unqueued no-op. The server acknowledges `202` before parsing, then incrementally consumes `~/.codex/sessions/**/rollout-*.jsonl`; duplicate hook and watcher notifications are idempotent through a durable byte cursor. Reads advance through complete JSONL records in newline-aligned 64 MiB windows, so a rollout may exceed V8's single-string limit without forcing the whole unread range into memory. Before Codex creates either a hook identity or a native live-thread row, a one-second process probe exposes an in-memory Waiting card to the live Dashboard and Kanban reads. It never writes a session, agent, event, token, workflow, alert, or history row, and disappears when the process exits or durable Codex data takes its place. If Codex defers a new hook for trust approval after assigning an id, the synchronizer reads the very recent native `state_*.sqlite` live-thread row and creates the durable startup card before the rollout is flushed. Newest rollouts are scanned first, a bad historical file remains eligible for retry without blocking the rest, and long cold scans yield between small batches so fresh sessions reach the dashboard promptly. Supported lifecycle notifications are `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd`. `PreToolUse` intentionally ingests the just-completed model turn before a long-running tool delays its matching `PostToolUse` notification.
+
+Codex's append-only rollout is authoritative for live state: `user_message` and `task_started` clear the waiting overlay and set the main agent to `working`; `task_complete` keeps the session `active` but makes its cards **Waiting** with `awaiting_reason = stop`; and `turn_aborted` makes them **Waiting** with `awaiting_reason = interrupted`. Only `SessionEnd` is terminal. A new rollout turn reactivates a session prematurely completed by a missed or mistimed lifecycle notification. After a restart or partial write, the synchronizer reconciles the latest stored Codex lifecycle event and conservatively changes a silent `working` turn to interrupted Waiting after 90 seconds; the next rollout event self-heals it. On supported local hosts, the synchronizer and watchdog enumerate the exact `rollout-*.jsonl` files held open by live Codex processes. Historical files are created or reconciled as completed even when their `cwd` matches a live session; if the probe is unavailable, the existing fail-safe cwd behavior remains in force. The transient pre-identity overlay collapses the Node launcher/native-child PID pair before reconciliation, so a single interactive Codex launch cannot produce duplicate cards.
+
+### Hook-only Codex sessions (`codex exec --ephemeral`)
+
+`codex exec --ephemeral` runs "without persisting session files to disk", so no `rollout-*.jsonl` is ever written and every one of its hooks arrives with `transcript_path: null`. Such a session is driven entirely by its lifecycle notifications:
+
+- **Lifecycle.** `SessionStart` creates the card, `UserPromptSubmit` / `PreToolUse` / `PostToolUse` set the main agent `working`, `Stop` lands it in **Waiting** with `awaiting_reason = stop`, and `SessionEnd` completes the session and stamps `ended_at` — the same states a rollout-backed session moves through.
+- **History.** While the session has no rollout, the payloads themselves are persisted as ordinary events, each tagged `data.source = "hook"`: the prompt as `codex_user_message`, each call as `codex_tool_call`, a shell/MCP/web-search result as its matching `codex_*_end` record, the final assistant message as `codex_task_complete`, and the close as `SessionEnd`. The first prompt titles the session and fills the card's task exactly as a rollout `user_message` would.
+- **Precedence.** The rollout is always authoritative. If one is later linked to the session — an interactive run whose rollout was simply flushed late — the whole hook-built reconstruction is deleted before the byte cursor replays those turns, so nothing is counted twice.
+- **Marking.** The session carries `hook_only: true` in `sessions.metadata` (cleared with the reconstruction above). Session detail uses it to explain that no full transcript exists, instead of the generic "transcript not found" warning.
+- **Lost `SessionEnd`.** Hooks are fire-and-forget, so a dashboard that was down at exit never hears the terminal notification, and a hook-only session has neither a transcript mtime nor an open rollout for the liveness probes to judge — which is also why Windows, where both probes report unavailable, has no other fallback. The synchronizer therefore completes a `hook_only` session whose `awaiting_reason` is still `stop` after `DASHBOARD_CODEX_HOOK_IDLE_SECONDS` (default `60`): a real `Stop` hook arrived, and `SessionEnd` follows `Stop` within a few hundred milliseconds (82 ms / 70 ms / 265 ms across captured codex-cli 0.147.0 runs), so an unanswered `Stop` is positive evidence the notification was lost. A session that is somehow still running self-heals on its next hook through the usual reactivation path.
+
+  Silence is deliberately **not** a trigger. A rollout-less run emits no hooks whatsoever for the entire duration of a tool call — a captured `sleep 12` produced a 12,119 ms `PreToolUse`→`PostToolUse` gap, and a CI build or test suite is unbounded — so an idle-time rule would complete a live run mid-build. For the same reason `awaiting_reason = interrupted` is not eligible either: that reason is the 90-second idle-working heuristic's own inference rather than something Codex reported, and a guess must not be promoted to a terminal state.
+
+Claude `TurnDuration` records use a stable transcript identity (the record UUID when present, otherwise its byte offset). Complete transcript parses atomically reconcile the persisted duration set and exact metadata totals, repairing legacy duplicates; capped tail parses remain append-only so older persisted turns are never deleted. This also keeps timestamp-less, equal-duration turns distinct and replay-safe.
+
+This copies hook scripts from `scripts/hooks/` to `.githooks/`:
+
+```mermaid
+graph LR
+    Source[scripts/hooks/*.py] -->|Copy| Target[.githooks/*.py]
+    Handler[scripts/hook-handler.js] -->|Reference| Target
+    
+    Target -->|chmod +x| Executable[Executable Hooks]
+    
+    style Source fill:#3B82F6
+    style Executable fill:#10B981
+```
+
+### Manual Installation
+
+```bash
+#!/bin/bash
+# scripts/install-hooks.js
+
+HOOKS_DIR=".githooks"
+SOURCE_DIR="scripts/hooks"
+
+# Create hooks directory
+mkdir -p "$HOOKS_DIR"
+
+# Copy hook scripts
+cp "$SOURCE_DIR/session-start.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/pre-tool-use.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/post-tool-use.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/stop.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/subagent-stop.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/notification.py" "$HOOKS_DIR/"
+cp "$SOURCE_DIR/session-end.py" "$HOOKS_DIR/"
+
+# Make executable
+chmod +x "$HOOKS_DIR"/*.py
+
+echo "Hooks installed in .githooks/"
+```
+
+### Verification
+
+```bash
+# Check hook files exist
+ls -la .githooks/
+
+# Expected output:
+# session-start.py
+# pre-tool-use.py
+# post-tool-use.py
+# stop.py
+# subagent-stop.py
+# notification.py
+# session-end.py
+```
+
+### Installation readiness checklist
+
+Before relying on hooks for production monitoring:
+
+- Confirm the target dashboard answers `curl http://127.0.0.1:4820/api/health` from the machine that runs Claude Code or Codex.
+- Run `npm run install-hooks` on that host, then review the provider's hook configuration to confirm the dashboard entries point at a real host-side `hook-handler.js` path.
+- Start one short test session and verify that it creates activity in the dashboard before assuming historical import or remote sync is covering live events.
+- For a remote dashboard, configure `CCAM_DASHBOARD_URL` and a file-backed `CCAM_HOOK_TOKEN_FILE`; do not put the hook token directly in a shared shell history or checked-in configuration.
+- Keep hook failures non-blocking. If delivery cannot be established, fix the dashboard connection rather than replacing the fail-safe hook behavior.
+
+---
+
+> **Codex startup:** A fresh interactive Codex process first appears as an in-memory **Waiting** card, including while Codex is still at its trust screen or first prompt and has no stable session/thread ID. The card is local-only, non-navigable, excluded from durable APIs unless `include_transient=true`, and removed on process exit. A `SessionStart` hook, native live-thread row, or rollout then creates the durable session and main-agent rows without copying the temporary card into history.
+
+## Hook Types
+
+### 1. SessionStart
+
+Triggered when a Claude Code session starts. The `source` field distinguishes the trigger: `startup` (fresh launch), `resume` (`--resume`/`--continue`), `clear` (`/clear`), and `compact` — which fires **mid-turn** when auto-compaction kicks in while Claude is actively working, not at a fresh prompt.
+
+**Payload Example:**
+
+```json
+{
+  "type": "sessionStart",
+  "sessionId": "sess_abc123",
+  "source": "startup",
+  "model": "claude-sonnet-4",
+  "timestamp": "2024-03-18T12:00:00Z"
+}
+```
+
+**Purpose:**
+- Create the session and main-agent records on first contact
+- Stamp `awaiting_input_since` (with `awaiting_reason` = `session_start`) so the dashboard shows the row in **Waiting** from the moment the CLI lands at a prompt — **only for `startup`/`resume`/`clear`**. A `compact`-source SessionStart fires mid-turn while Claude is working, so it leaves the awaiting flag untouched: a genuinely-active session stays **Active** (not flipped to Waiting), and a session that compacted while idle keeps its existing Waiting flag and reason
+- Reactivate completed/abandoned sessions on resume
+- Sweep other active sessions whose last activity is older than `DASHBOARD_STALE_MINUTES` (default 180), marking them `abandoned` with their agents `completed`. A Remote Data Source session (`source` ≠ `local`) remains mirror-reconciled and excluded only while its matching Claude Code or Codex provider is healthy; an unavailable, errored, or stranded-in-`syncing` provider falls back to this shared stale sweep so old Waiting rows cannot linger forever
+
+---
+
+### 2. UserPromptSubmit
+
+Triggered the moment the user hits enter on a prompt — fires *before* Claude does any work.
+
+**Payload Example:**
+
+```json
+{
+  "type": "userPromptSubmit",
+  "sessionId": "sess_abc123",
+  "prompt": "Refactor this function...",
+  "timestamp": "2024-03-18T12:00:30Z"
+}
+```
+
+**Purpose:**
+- Clear `awaiting_input_since` (and `awaiting_reason` — both reset to NULL together) on the session and main agent
+- Promote the main agent to `working` so the dashboard reflects "Claude is now thinking on this" through the entire response — including text-only replies that emit no `PreToolUse` before `Stop`
+
+---
+
+### 3. PreToolUse
+
+Triggered before a tool executes.
+
+**Payload Example:**
+
+```json
+{
+  "type": "preToolUse",
+  "sessionId": "sess_abc123",
+  "agentId": "agent_main_001",
+  "toolName": "bash",
+  "timestamp": "2024-03-18T12:01:00Z"
+}
+```
+
+**Purpose:**
+- Clear `awaiting_input_since` (and `awaiting_reason` — both reset to NULL together; Claude can only call a tool after fresh user input)
+- Set agent to `working`, set `current_tool`
+- Track tool execution start time
+- If tool name is `Agent`, create a subagent record
+
+---
+
+### 4. PostToolUse
+
+Triggered after a tool completes execution.
+
+**Payload Example:**
+
+```json
+{
+  "type": "postToolUse",
+  "sessionId": "sess_abc123",
+  "agentId": "agent_main_001",
+  "toolName": "bash",
+  "durationMs": 1234,
+  "success": true,
+  "inputTokens": 1500,
+  "outputTokens": 800,
+  "timestamp": "2024-03-18T12:01:01.234Z"
+}
+```
+
+**Purpose:**
+- Clear `awaiting_input_since` (and `awaiting_reason` — both reset to NULL together; covers permission-prompt approval mid-tool)
+- Clear `current_tool` on agent (agent stays `working`)
+- Update agent token counts via shared transcript cache
+- Calculate and update cost
+- Rollup cost to session
+
+**Cost Calculation Flow:**
+
+```mermaid
+graph TB
+    PostHook[PostToolUse Hook] --> Tokens{Has Token<br/>Counts?}
+    Tokens -->|Yes| Pricing[Fetch Pricing Rule]
+    Tokens -->|No| Skip[Skip Cost Update]
+    
+    Pricing --> Calculate[Cost = <br/>input/1M * input_price +<br/>output/1M * output_price]
+    Calculate --> UpdateAgent[Update agent.cost]
+    UpdateAgent --> Rollup[Rollup to session.total_cost]
+    Rollup --> Broadcast[Broadcast Updates]
+    
+    style Calculate fill:#10B981
+    style Broadcast fill:#F59E0B
+```
+
+---
+
+### 5. Stop
+
+Triggered when Claude finishes a turn (NOT when the session is closed).
+
+**Payload Example:**
+
+```json
+{
+  "type": "stop",
+  "sessionId": "sess_abc123",
+  "stop_reason": "end_turn",
+  "timestamp": "2024-03-18T12:05:00Z"
+}
+```
+
+**Purpose:**
+- Non-error: set main agent to `idle` and stamp `awaiting_input_since` (with `awaiting_reason` = `stop`) — Claude finished its turn, ball is in the user's court. The session shows as **Waiting** until `UserPromptSubmit` / `PreToolUse` fires
+- Error (`stop_reason="error"`): drop `awaiting_input_since` (and `awaiting_reason`, cleared to NULL together), mark the session `error`
+- Background subagents continue running — they complete individually via `SubagentStop`, never via `Stop`
+
+> **Note:** `Stop` does **not** fire when the user cancels a turn with `Esc` — interrupts emit no hook at all. The dashboard instead recovers cancelled turns from the transcript (see [User interrupts (Esc)](#user-interrupts-esc--no-hook-fires)).
+
+---
+
+### 6. SubagentStop
+
+Triggered when a sub-agent (explore, task, etc.) completes.
+
+**Payload Example:**
+
+```json
+{
+  "type": "subagentStop",
+  "sessionId": "sess_abc123",
+  "agentId": "agent_explore_002",
+  "agentType": "explore",
+  "timestamp": "2024-03-18T12:03:00Z"
+}
+```
+
+**Purpose:**
+- Match the finishing subagent by description, type, or task and mark it `completed`
+- **Deliberately does NOT clear `awaiting_input_since`** (nor `awaiting_reason`) — a backgrounded subagent finishing tells us nothing about whether the human has responded
+- **Triggers a fire-and-forget JSONL scan** (`scanAndImportSubagents` from `scripts/import-history.js`) after `res.json()` returns. The scan walks the session's `subagents/agent-*.jsonl` files, pairs each assistant `tool_use` block with the next matching user `tool_result` block by `tool_use_id`, and emits per-tool `PreToolUse` + `PostToolUse` events under the subagent's own `agent_id`. Idempotent (`data LIKE '%"tool_use_id":"X"%'` dedup) and merges into a hook-created live row when one matches by `subagent_type + started_at` within 30 s — closes the gap where subagent-internal tool calls would otherwise be invisible to the dashboard
+- **Attributes per-subagent tokens to each subagent's OWN model** (issue #185). Each subagent transcript carries its own `msg.usage` under its own `msg.model`; the scan stamps the resolved model and token buckets onto that agent's metadata for its individual cost. For session cost, every hook event reads the main transcript plus all flat `subagents/*.jsonl` files and writes their combined model buckets (issue #345), so the asynchronous scan skips every model that live combined writer already owns. The lookup is non-recursive, so nested Workflow-tool agents keep their separately tracked workflow cost. `importSession` / `reconcileTokens` uses the same combination rule for historical sessions
+- **Rebuilds the nested-subagent hierarchy** (`reconcileSubagentParents`). Subagent rows are inserted flat under the main agent because no single hook event or JSONL file carries the spawner's identity. Each subagent transcript, however, records every child it spawned via the Task tool as `toolUseResult.agentId` (surfaced by `parseSubagentFile` as `spawnedChildren`). The scan inverts these into a child→parent map and repoints `parent_agent_id` (via `setAgentParent`) so a subagent that spawns its own subagents nests under its **true** spawner instead of collapsing to a single level under main; any subagent no other subagent claims stays under main. Idempotent and additive (only rewrites `parent_agent_id`, never inserts/deletes), it also corrects the live PreToolUse-`Agent` parent heuristic's guesses once transcripts land. `scanAndImportSubagents` returns `reparented` alongside `created`; the `SubagentStop` refetch nudge fires when either is non-zero so a pure re-parent still refreshes the tree
+- Imported tool events carry `imported: true, source: "subagent_jsonl"` in their JSON `data` payload so analytics can distinguish backfilled rows from live hook-captured ones if needed
+
+---
+
+### 7. Notification
+
+Triggered when Claude Code sends a system notification.
+
+**Payload Example:**
+
+```json
+{
+  "type": "notification",
+  "sessionId": "sess_abc123",
+  "notificationType": "backgroundTaskComplete",
+  "message": "Explore agent completed successfully",
+  "timestamp": "2024-03-18T12:03:00Z"
+}
+```
+
+**Purpose:**
+- Log the event for the activity feed
+- If the message matches a permission/input-prompt pattern (`permission`, `waiting for input`, `needs your approval`, `awaiting your response`, …), stamp `awaiting_input_since` (with `awaiting_reason` = `notification`) so the session lands in **Waiting**
+- If the message matches a compaction pattern, tag as a `Compaction` event
+- Trigger a browser notification when the user has notifications enabled
+
+---
+
+### 8. SessionEnd
+
+Triggered when a Claude Code session ends.
+
+**Payload Example:**
+
+```json
+{
+  "type": "sessionEnd",
+  "sessionId": "sess_abc123",
+  "timestamp": "2024-03-18T14:30:00Z"
+}
+```
+
+**Purpose:**
+- Drop `awaiting_input_since` (and `awaiting_reason`, cleared to NULL together) on the session and any agents that still have it
+- Mark all agents and the session as `completed` — **unless the session is in `error` AND that error is still unrecovered at the transcript tail** (`isErrorAtTail`: the latest API error has no successful turn after it), in which case `error` is preserved. A transient error the CLI retried past (successful assistant turns after the last error) finalizes as `completed` instead of freezing in a stale `error`
+- Evict the session's transcript from the shared transcript cache
+
+> **Stale-error self-heal.** Separately from `SessionEnd`, the 15 s watchdog now scans `error` sessions (not just `active`) and clears a session back to `active` when its transcript has progressed past the last API error (`isErrorAtTail` is false). Claude auto-retries transient API errors (e.g. "Connection closed mid-response") and keeps working, so an error followed by real turn activity has recovered — recovery previously required a live `UserPromptSubmit`/`PreToolUse` hook, leaving imported or sweep-monitored sessions pinned in `error` indefinitely.
+
+---
+
+## Hook Handler Implementation
+
+### Hook transport architecture
+
+```mermaid
+flowchart LR
+  STDIN["Hook JSON on stdin"] --> WRAP["Add hook_type"]
+  WRAP --> TARGET{"CCAM_DASHBOARD_URL set?"}
+  TARGET -->|No| LOCAL["Discover local dashboard ports"]
+  TARGET -->|Yes| VALIDATE["Require HTTP(S); remote requires HTTPS + hook token"]
+  LOCAL --> SEND["Fire-and-forget POST"]
+  VALIDATE --> SEND
+  SEND --> EVENT["/api/hooks/event or /api/hooks/codex"]
+  SEND --> EXIT["Always exit 0; 2.5s safety net"]
+```
+
+The real handlers are intentionally small. `scripts/hook-handler.js` and
+`scripts/codex-hook-handler.js` parse stdin and delegate delivery to
+`scripts/hook-transport.js`. Local mode fans out to one live dashboard per
+unique SQLite data directory. Remote mode uses `CCAM_DASHBOARD_URL`, requires
+HTTPS outside loopback, reads `CCAM_HOOK_TOKEN` or `CCAM_HOOK_TOKEN_FILE`, and
+sends `x-ccam-hook-token`. Requests resolve when the body is flushed, not when
+the dashboard replies, so a slow or unavailable server never delays the agent
+CLI. Parse errors are wrapped as raw input, and all network/configuration errors
+fail silently with exit code 0.
+
+> **Port resolution & fan-out.** In local mode, `scripts/hook-handler.js`
+> resolves targets at runtime through `server/lib/server-info.js`:
+>
+> 1. If `CLAUDE_DASHBOARD_PORT` is set in the environment, the handler treats
+>    it as an explicit operator override and POSTs to that single port —
+>    no discovery, no fan-out (useful for tests and container setups).
+> 2. Otherwise it reads `~/.claude/.agent-dashboard.json`, a JSON document
+>    that lists every dashboard server currently running on the machine.
+>    Each server appends its `{port, pid, startedAt, dataDir}` entry on
+>    startup and removes it on a clean shutdown. The handler **prunes any
+>    entry whose PID is no longer alive** and POSTs the hook payload to one
+>    port per **unique SQLite data directory** (lowest port wins when Docker
+>    and `npm run dev` share `~/.claude/agent-dashboard`).
+> 3. If neither yields a target, the handler falls back to `4820`.
+>
+> Dashboards with **different** databases (e.g. the packaged desktop app using
+> its own Application Support data dir alongside `npm run dev`) still each
+> receive hooks. Dashboards sharing one database never double-ingest events.
+
+---
+
+## Event Processing
+
+### Server-Side Hook Processing
+
+```javascript
+// server/routes/hooks.js
+
+router.post('/session-start', (req, res) => {
+  try {
+    const { sessionId, model, agentId, agentType } = req.body;
+    
+    // Upsert session
+    let session = stmts.findSession.get(sessionId);
+    if (!session) {
+      stmts.createSession.run(sessionId, model);
+      session = stmts.findSession.get(sessionId);
+      broadcast({ type: 'session.created', data: session });
+    }
+    
+    // Create main agent
+    if (!stmts.findAgent.get(agentId)) {
+      stmts.createAgent.run(agentId, sessionId, agentType);
+      const agent = stmts.findAgent.get(agentId);
+      broadcast({ type: 'agent.created', data: agent });
+    }
+    
+    // Touch session (update updated_at)
+    stmts.touchSession.run(sessionId);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('session-start error:', err);
+    res.json({ success: false, error: err.message });
+  }
+});
+```
+
+### Event Processing Pipeline
+
+```mermaid
+graph TB
+    Hook[Hook Event] --> Validate[Validate Payload]
+    Validate --> DB[Database Operations]
+    DB --> Session[Update Session]
+    DB --> Agent[Update Agent]
+    DB --> Tool[Create Tool Record]
+    
+    Session --> Broadcast[Broadcast to WebSocket]
+    Agent --> Broadcast
+    Tool --> Broadcast
+    
+    Broadcast --> Client1[Client 1]
+    Broadcast --> Client2[Client 2]
+    Broadcast --> ClientN[Client N]
+    
+    style Validate fill:#3B82F6
+    style DB fill:#003B57,color:#fff
+    style Broadcast fill:#F59E0B
+```
+
+### Transcript-derived sync
+
+Cursor uses the same fail-safe hook transport where available, but its native lifecycle starts under `~/.cursor/chats`, not in the later JSONL. The watcher creates `provider = 'cursor'` rows from `meta.json` at CLI launch, changes the main agent from waiting to working when `prompt_history.json` gains a submitted turn, persists a deduplicated `cursor_user_message` for Timeline/last-active state, and broadcasts the same session/agent/event WebSocket frames as hooks. A hook payload whose `transcript_path` matches `~/.cursor/projects/*/agent-transcripts/<session>/<session>.jsonl` is still classified as Cursor. The enrichment pass joins the canonical transcript when it arrives, updates native title/cwd/turn metadata, imports sibling `subagents/*.jsonl`, and snapshots the files under the dashboard data directory.
+
+Cursor has no Stop-equivalent that the sync can rely on, so its turn lifecycle is derived from activity. A main agent that is `working` with no tool in flight and no awaiting-input flag moves to **Waiting** once neither its `~/.cursor` files nor a hook have advanced for `DASHBOARD_WORKING_IDLE_SECONDS` (default 120 s). After 10 minutes without activity the session completes. A prompt that is only discovered after that window, for example while the dashboard was down, updates history without reviving the agent. The first sync after boot and every 5 minutes after that also complete any live-status agents still attached to `completed`/`abandoned` Cursor sessions. These are rows older builds left showing **Working** indefinitely, which the stale sweep never examined because it only looks at `active` sessions.
+
+Startup and periodic `cursor-ingest` sweeps also discover sessions that existed before the dashboard or never emitted a hook. This is the backfill path for older placeholder cards: when `meta.json` carries no title, the sweep reads the chat name read-only from the Cursor IDE's `User/globalStorage/state.vscdb` (`DASHBOARD_CURSOR_STATE_DB` overrides the path) and falls back to the first prompt, then `Cursor session <id>`, if that store is missing, locked, or unrecognized. Before JSONL exists, Conversation reads synthesize stable user-message rows from prompt history; once the transcript arrives, matching ids replace those rows without duplicates. Reads then resolve the original path first and the durable snapshot second, so messages and tool calls survive Cursor cleanup. `DASHBOARD_CURSOR_HOME` overrides the root and `DASHBOARD_CURSOR_SYNC_MS=0` disables only the polling fallback—filesystem watching remains active.
+
+On every event that carries a `transcript_path`, the shared `TranscriptCache` re-reads the JSONL (incrementally) and the ingestor keeps three session fields in sync with what the user is actually doing in the CLI:
+
+- **Tokens / cost** — usage is accumulated per model bucket (compaction-aware baselines).
+- **Model** — the most recent assistant entry's model keeps `sessions.model` current after a `/model` switch.
+- **Name** — the session title is read from the transcript: the `custom-title` line (`/rename`, `claude -n`, picker `Ctrl+R`) always wins, otherwise the auto-generated `ai-title` fills a placeholder/auto name (so a user-chosen name is never clobbered). When neither title exists, the session's **first user prompt** (tool-result, meta/caveat, and slash-command plumbing entries skipped; whitespace-collapsed, 60-char label) fills the placeholder session name plus the main agent's placeholder name and empty task — a later `ai-title` can still replace a descriptor-filled name, and the agent fill passes the in-flight `current_tool` through so it is never wiped mid-turn. `sessions.name` is updated via a no-op-guarded statement and a `session_updated` broadcast fires only on a real change, so the dashboard reflects renames in real time. The 15 s error-detection watchdog runs the same sync for active sessions left idle right after a `/rename`.
+
+### User interrupts (Esc) — no hook fires
+
+Cancelling a turn with `Esc` fires **no hook at all** (a documented Claude Code limitation — there is no `Stop`, `Notification`, or other event on interrupt). Since `UserPromptSubmit` has already promoted the main agent to `working`, an un-handled cancel would leave the session stuck in `working` indefinitely. The dashboard recovers it from the transcript, via the same 15 s watchdog, two ways:
+
+1. **Marker path** — when the cancel happens *after* some output, Claude Code appends a `[Request interrupted by user]` user entry (with an `interruptedMessageId`). `TranscriptCache` reports `pendingInterrupt`, computed from transcript ordering alone: the latest interrupt timestamp vs the latest real turn activity, both on Claude Code's clock. (It is **not** compared against the session's last hook event — those clocks differ, and for a sub-second cancel the `UserPromptSubmit` event is recorded *after* the transcript interrupt, the precise case that used to stay stuck.) The session moves to **Waiting** within ~15 s.
+2. **Idle-working timeout** — when Esc is pressed *before any output*, Claude Code writes **no marker**; the only evidence is silence. When the main agent has been `working` with `current_tool` null and **neither a hook event nor the transcript mtime** has advanced for `DASHBOARD_WORKING_IDLE_SECONDS` (default `120`), the turn is treated as dead. A streaming/long-output turn (transcript still growing) and an in-flight tool call are exempt by those guards; a rare false flip self-heals on the next real hook.
+
+Both paths land the session in **Waiting** (main agent → `waiting`, `awaiting_input_since` stamped with `awaiting_reason` = `interrupted` — identical to a non-error `Stop` aside from the reason) and log an `Interrupted` event. A resume (new prompt in the transcript) clears `pendingInterrupt` and the fresh hook keeps the session non-stale.
+
+### Missed SessionEnd (dashboard down) — liveness reap
+
+`SessionEnd` is the only signal that a session closed, and hooks are fire-and-forget: if the dashboard was **not running** when the user quit (Ctrl+C, terminal closed), the POST fails silently and the event is lost forever — the session previously sat in **Waiting** until the stale sweep (3 h by default). The same 15 s watchdog closes the gap with a **process-liveness probe** (`server/lib/session-liveness.js`): it enumerates the matching running `claude` or `codex` CLI processes and their working directories (`ps` + `lsof` on macOS, `/proc/<pid>/cwd` on Linux) and completes an `active` local-provider session only when its matching CLI has no live process — the same terminal state a real `SessionEnd` produces, plus a synthetic `SessionEnd` event (`data.source = "liveness-probe"`) on the timeline.
+
+Fail-safe guards: the probe reports "no answer" (nothing changes) on Windows, inside containers (host processes are invisible), on `ps`/`lsof` failure, or when disabled via `DASHBOARD_LIVENESS_PROBE=0` (the escape hatch for hooks arriving from another machine); the session must have a `cwd`, and that `cwd` must be **POSIX-absolute** — a household-hook-forwarded session reports the origin machine's own path (e.g. a Windows `D:\Git\ai-deck`) that this host's `/proc`/`lsof` scan can never produce, so the reap skips it rather than falsely completing every remote session (this makes a mixed local + forwarded deployment correct without the blanket `DASHBOARD_LIVENESS_PROBE=0`); **Remote Data Source sessions** (`sessions.source` ≠ `local`) are also skipped outright by the local process probe and the watchdog's error/interrupt scan — their POSIX-absolute `cwd` lives on another machine reached over SSH, so this host proves nothing about them. Healthy provider mirrors are also excluded from stale sweeps because `remote-sync.js` reconciles each provider's status from its matching mirror; if that provider reports `error`, is `unavailable`, or stays `syncing` longer than `DASHBOARD_STALE_MINUTES`, its old active session instead uses the ordinary stale fallback and becomes `abandoned` with its agents completed. A fresh mirror can reactivate it if the remote CLI is still writing; and — on watchdog ticks only — a local session's transcript must not have been written for at least `DASHBOARD_LIVENESS_IDLE_SECONDS` (default `60`; the last hook write is the fallback clock when no transcript exists on disk) so a mid-turn / just-resumed session never flickers out. The reap runs immediately at startup (rows from a previous run), again ~5 s after startup (rows the startup sync just imported) — both startup passes **skip the idle gate**, so a session quit even seconds before launch clears at once — and on every 15 s watchdog tick (gated) as the safety net. A false completion self-heals — the next hook event reactivates the session.
+
+---
+
+## Error Handling
+
+### Error Handling Strategy
+
+```mermaid
+graph TB
+    Error[Error Occurs] --> Type{Error Type?}
+    
+    Type -->|Network Error| Retry[Retry Once]
+    Type -->|Timeout| Log1[Log + Exit 1]
+    Type -->|Parse Error| Log2[Log + Exit 1]
+    Type -->|Server Error| Log3[Log + Exit 1]
+    
+    Retry --> Success{Success?}
+    Success -->|Yes| Exit0[Exit 0]
+    Success -->|No| Exit1[Exit 1]
+    
+    Log1 --> Exit1
+    Log2 --> Exit1
+    Log3 --> Exit1
+    
+    style Exit0 fill:#10B981
+    style Exit1 fill:#EF4444
+```
+
+### Hook Script Error Handling
+
+```python
+#!/usr/bin/env python3
+# .githooks/session-start.py
+
+import sys
+import json
+import subprocess
+import logging
+
+logging.basicConfig(
+    filename='.githooks/hooks.log',
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+try:
+    data = json.load(sys.stdin)
+    
+    result = subprocess.run(
+        ['node', 'scripts/hook-handler.js', 'session-start'],
+        input=json.dumps(data),
+        text=True,
+        timeout=5,
+        capture_output=True
+    )
+    
+    if result.returncode != 0:
+        logging.error(f'Hook handler failed: {result.stderr}')
+    
+except Exception as e:
+    logging.error(f'Hook error: {str(e)}')
+
+# Always exit 0 to avoid blocking Claude Code
+sys.exit(0)
+```
+
+---
+
+## Performance Considerations
+
+### Hook Execution Time
+
+```mermaid
+graph TB
+    subgraph "Hook Execution Breakdown"
+        Python[Python Script<br/>~10ms]
+        Handler[Node Handler<br/>~20ms]
+        HTTP[HTTP POST<br/>~30ms]
+        DB[Database Write<br/>~5ms]
+        WS[WebSocket Broadcast<br/>~5ms]
+    end
+    
+    Total[Total: ~70ms]
+    
+    Python --> Handler
+    Handler --> HTTP
+    HTTP --> DB
+    DB --> WS
+    WS --> Total
+    
+    style Total fill:#10B981
+```
+
+**Performance Targets:**
+
+| Phase | Target | Actual |
+|-------|--------|--------|
+| Hook script | < 20ms | ~10ms |
+| Handler | < 30ms | ~20ms |
+| HTTP POST | < 50ms | ~30ms |
+| Database | < 10ms | ~5ms |
+| **Total** | **< 100ms** | **~70ms** |
+
+### Optimization Techniques
+
+```mermaid
+graph TB
+    subgraph "Optimizations"
+        Async[Async HTTP<br/>Don't wait for response]
+        Batch[Batch Updates<br/>Transaction batching]
+        Index[Database Indexes<br/>Fast lookups]
+        Pool[Connection Pooling<br/>Reuse connections]
+    end
+    
+    Async --> Faster[Faster Hook Execution]
+    Batch --> Faster
+    Index --> Faster
+    Pool --> Faster
+    
+    style Faster fill:#10B981
+```
+
+---
+
+## Testing Hooks
+
+### Manual Testing
+
+```bash
+# Test session-start hook
+echo '{"type":"sessionStart","sessionId":"test_001","model":"claude-sonnet-4","agentId":"agent_test","agentType":"general-purpose"}' | \
+  python3 .githooks/session-start.py
+
+# Test pre-tool-use hook
+echo '{"type":"preToolUse","sessionId":"test_001","agentId":"agent_test","toolName":"bash"}' | \
+  python3 .githooks/pre-tool-use.py
+
+# Test post-tool-use hook
+echo '{"type":"postToolUse","sessionId":"test_001","agentId":"agent_test","toolName":"bash","durationMs":100,"success":true,"inputTokens":1000,"outputTokens":500}' | \
+  python3 .githooks/post-tool-use.py
+```
+
+### Integration Testing
+
+```javascript
+// server/__tests__/hooks.test.js
+import { test } from 'node:test';
+import assert from 'node:assert';
+
+test('session-start hook creates session', async () => {
+  const payload = {
+    sessionId: 'test_session',
+    model: 'claude-sonnet-4',
+    agentId: 'test_agent',
+    agentType: 'general-purpose'
+  };
+  
+  const response = await fetch('http://localhost:4820/hooks/session-start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  
+  const data = await response.json();
+  assert.strictEqual(data.success, true);
+  
+  // Verify session exists
+  const session = await fetch('http://localhost:4820/api/sessions/test_session');
+  assert.strictEqual(session.status, 200);
+});
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+| Issue | Symptoms | Solution |
+|-------|----------|----------|
+| Hooks not executing | No data in dashboard | Check `.githooks/` exists and scripts are executable |
+| Timeout errors | Hooks take >5s | Check server is running, reduce timeout |
+| Parse errors | JSON parse failed | Validate hook payload format |
+| Permission denied | Hook script won't run | `chmod +x .githooks/*.py` |
+| Server connection refused | HTTP POST fails | Start dashboard server (`npm start`) |
+
+### Debug Mode
+
+```bash
+# Enable hook logging
+export DASHBOARD_DEBUG=1
+
+# Run hook manually with verbose output
+python3 -u .githooks/session-start.py < test-payload.json
+```
+
+### Health Check
+
+```bash
+# Check server is running
+curl http://localhost:4820/api/sessions
+
+# Expected: {"sessions": [...]}
+```
+
+---
+
+## Summary
+
+The hook system provides:
+
+- ✅ **Real-time event capture** - Lifecycle, tools, notifications
+- ✅ **Non-blocking execution** - Never delays Claude Code
+- ✅ **Fail-safe design** - Errors don't stop execution
+- ✅ **Fast processing** - < 100ms per hook
+- ✅ **Complete coverage** - All agent lifecycle events
+- ✅ **Easy installation** - One-command setup
+
+For server-side processing, see [server/README.md](../server/README.md).

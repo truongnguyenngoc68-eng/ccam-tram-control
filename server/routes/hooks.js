@@ -1,0 +1,2721 @@
+/**
+ * @file Express router for Claude Code and Cursor hook events plus a fail-safe
+ * Codex rollout endpoint. It updates sessions and agents, extracts usage and
+ * compact human-turn card context, and broadcasts real-time changes without
+ * blocking any agent host.
+ * @author Son Nguyen <hoangson091104@gmail.com>
+ */
+
+const { Router } = require("express");
+const fs = require("fs");
+const { v4: uuidv4 } = require("uuid");
+const dbModule = require("../db");
+const { stmts, db } = dbModule;
+const { broadcast } = require("../websocket");
+const TranscriptCache = require("../lib/transcript-cache");
+const {
+  scanAndImportSubagents,
+  findSessionSubagents,
+  combineSessionTokens,
+} = require("../../scripts/import-history");
+const { evaluateEvent } = require("../lib/alerts");
+const { ingestWorkflowsForSession } = require("../lib/workflow-ingest");
+// Required as a module object (not destructured) so tests can swap
+// `liveness.probeLiveCwds` and the watchdog picks the stub up at call time.
+const liveness = require("../lib/session-liveness");
+const { getRemotePushToken, extractHeaderOnlyToken, tokensMatch } = require("../lib/security");
+const { REMOTE_PROVIDERS, assertProvider } = require("../lib/remote-sync");
+const { normalizeSpeed, normalizeGeo, normalizeTier } = require("../lib/token-usage");
+const { isCursorTranscriptPath } = require("../lib/cursor-home");
+const { getProjectsDir } = require("../lib/claude-home");
+const {
+  TranscriptPathError,
+  decodeBase64Strict,
+  isValidSessionId,
+  resolveTranscriptPath,
+  appendChunk,
+} = require("../lib/remote-transcript");
+
+const router = Router();
+
+// Shared cache instance — reused by periodic compaction scanner via router.transcriptCache
+const transcriptCache = new TranscriptCache();
+
+/**
+ * Add flat Claude subagent transcript usage to the main transcript totals.
+ *
+ * The hook path owns live token updates, including for sessions that never run
+ * the offline importer. Reading every file through the shared cache keeps this
+ * incremental after the first event. `findSessionSubagents` is deliberately
+ * non-recursive, so Workflow-tool inner agents remain in their separately
+ * tracked workflow buckets instead of being charged to the parent twice.
+ *
+ * A missing, partial, or concurrently removed subagent file is non-fatal. The
+ * main transcript still advances, and a later hook retries the subagent scan.
+ */
+function combineLiveSessionTokens(transcriptPath, mainTokensByModel) {
+  const parsedSubagents = [];
+  for (const subagentPath of findSessionSubagents(transcriptPath)) {
+    const lastKnown = transcriptCache.getCachedEntry(subagentPath);
+    try {
+      const subagent = transcriptCache.extract(subagentPath);
+      if (subagent && subagent.tokensByModel) {
+        parsedSubagents.push(subagent);
+      } else if (lastKnown?.result?.tokensByModel) {
+        transcriptCache.restoreCachedEntry(subagentPath, lastKnown);
+        parsedSubagents.push(lastKnown.result);
+      }
+    } catch {
+      if (lastKnown?.result?.tokensByModel) {
+        transcriptCache.restoreCachedEntry(subagentPath, lastKnown);
+        parsedSubagents.push(lastKnown.result);
+      }
+    }
+  }
+
+  if (parsedSubagents.length === 0) return mainTokensByModel;
+  return combineSessionTokens({ tokensByModel: mainTokensByModel, parsedSubagents });
+}
+
+// Stale-session threshold for the SessionStart cleanup pass. Mirrors the
+// periodic sweep in server/index.js so both code paths agree on what counts
+// as "abandoned". Configurable via DASHBOARD_STALE_MINUTES; default 180 (3h).
+const STALE_MINUTES = (() => {
+  const raw = parseInt(process.env.DASHBOARD_STALE_MINUTES, 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180;
+})();
+
+// Detect Notification messages that indicate Claude Code is blocked waiting
+// for the user (permission prompt or "waiting for your input" notice). Idle
+// notifications such as "Claude has finished responding" intentionally do
+// NOT match — those don't actually block the session.
+const WAITING_INPUT_PATTERN =
+  /\bpermission\b|waiting (?:for )?(?:your )?(?:input|response|reply|approval)|needs?\s+your\s+(?:input|approval|response|attention)|approval\s+(?:needed|required)|awaiting\s+(?:your\s+)?(?:input|approval|response)/i;
+
+function isWaitingForUserMessage(msg) {
+  if (!msg || typeof msg !== "string") return false;
+  return WAITING_INPUT_PATTERN.test(msg);
+}
+
+// Claude Code's structured Notification `notification_type` (hooks reference).
+// When present it is authoritative: the idle reminder ("Claude is waiting for
+// your input", type `idle_prompt`) matches WAITING_INPUT_PATTERN textually but
+// only means the turn ended and the user has not typed yet -- it does not block
+// anything, so it must not raise a Waiting badge. Unknown future types and
+// older Claude Code versions without the field fall back to the text pattern.
+const BLOCKING_NOTIFICATION_TYPES = new Set([
+  "permission_prompt",
+  "elicitation_dialog",
+  "elicitation_url_dialog",
+  "agent_needs_input",
+  // Auto-resume found the usage limit still in effect and waits for Enter
+  // instead of continuing (hooks reference) -- the user must act.
+  "quota_auto_resume_stale",
+]);
+const NON_BLOCKING_NOTIFICATION_TYPES = new Set([
+  "idle_prompt",
+  "auth_success",
+  "elicitation_complete",
+  "elicitation_response",
+  "agent_completed",
+  "quota_auto_resume_fired",
+  "quota_auto_resume_disabled",
+]);
+
+function isBlockingNotification(data, msg) {
+  const type = data && typeof data.notification_type === "string" ? data.notification_type : null;
+  if (type && BLOCKING_NOTIFICATION_TYPES.has(type)) return true;
+  if (type && NON_BLOCKING_NOTIFICATION_TYPES.has(type)) return false;
+  return isWaitingForUserMessage(msg);
+}
+
+/**
+ * Removes credentials, query values, and fragments from a collector-provided
+ * Git remote before it reaches durable storage or an API response. Both URL
+ * and SCP-like Git remotes are accepted; repository matching needs only the
+ * credential-free repository identity.
+ *
+ * @param {unknown} value Collector-provided remote URL.
+ * @returns {string|null} Sanitized non-empty remote, or null when unavailable.
+ */
+function sanitizeRepoRemoteUrl(value) {
+  if (typeof value !== "string") return null;
+  const remote = value.trim();
+  if (!remote) return null;
+  try {
+    const parsed = new URL(remote);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      parsed.username = "";
+      parsed.password = "";
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    }
+  } catch {
+    // Fail closed on malformed URLs: falling through would persist userinfo
+    // (for example a credential-bearing HTTPS URL with an invalid port).
+    if (remote.includes("://")) return null;
+    // SCP-like Git syntax (for example git@host:org/repo.git) is not a URL.
+  }
+  return remote.replace(/^[^@/\s:]+@(?=[^@/\s:]+:)/, "").replace(/[?#].*$/, "");
+}
+
+function clearAwaitingInput(sessionId, mainAgentId, broadcastUpdates) {
+  // Clear waiting flag on the main agent and any other agents on this session
+  // (subagents don't normally enter waiting state, but keep them in sync just
+  // in case a future notification path stamps one).
+  const cleared = stmts.clearSessionAgentsAwaitingInput.run(sessionId);
+  const sessCleared = stmts.clearSessionAwaitingInput.run(sessionId);
+  if (broadcastUpdates && cleared.changes > 0 && mainAgentId) {
+    const refreshedMain = stmts.getAgent.get(mainAgentId);
+    if (refreshedMain) broadcast("agent_updated", refreshedMain);
+  }
+  if (broadcastUpdates && sessCleared.changes > 0) {
+    const refreshedSess = stmts.getSession.get(sessionId);
+    if (refreshedSess) broadcast("session_updated", refreshedSess);
+  }
+}
+
+// Reason-aware guarded clear (2026-07-17, AI-Deck/deck-web fork patch — see
+// decisions/ in the home-network repo). PreToolUse/PostToolUse clear the
+// waiting flag on the assumption that a tool event means the human resumed.
+// That assumption breaks when the MAIN agent is blocked on the user
+// (AskUserQuestion / permission) while a BACKGROUND subagent keeps firing
+// PreToolUse/PostToolUse: the subagent's tool event is not the human
+// responding, yet it wiped the flag — so AI-Deck/deck-web lost the "waiting
+// for you" signal (it oscillated on/off in seconds).
+//
+// The existing subagent-actor heuristic (findDeepestWorkingAgent, used just
+// below in each case) already tells us when a subagent — not main — is the
+// actor. We reuse it here: when a subagent is the actor we clear ONLY passive
+// waits (stop/session_start/interrupted); a genuine 'notification' wait (main
+// blocked on the user) is preserved. When MAIN is the actor we clear
+// unconditionally, exactly as before — this keeps the documented
+// permission-mid-tool path (PostToolUse clearing an approved prompt) intact.
+//
+// Passive-clear-by-subagent is deliberate and desirable: it is what lets a
+// backgrounded subagent's activity flip a session that merely Stop-ed
+// (reason='stop') back to active — i.e. "done/idle only while no agent works".
+function clearAwaitingInputRespectingActor(
+  sessionId,
+  mainAgentId,
+  subagentIsActor,
+  broadcastUpdates
+) {
+  if (subagentIsActor) {
+    const sess = stmts.getSession.get(sessionId);
+    if (sess && sess.awaiting_reason === "notification") {
+      // Main is blocked on the user; a subagent tool event must not clear it.
+      return;
+    }
+  }
+  clearAwaitingInput(sessionId, mainAgentId, broadcastUpdates);
+}
+
+// True when the deepest currently-working agent is a subagent while the main
+// agent is in 'waiting' — i.e. an incoming tool event is attributable to a
+// subagent, not to the main agent resuming. Mirrors the inline heuristic the
+// PreToolUse/PostToolUse cases already use for agent attribution.
+function subagentIsActorNow(sessionId, mainAgent) {
+  if (!mainAgent || mainAgent.status !== "waiting") return false;
+  return !!stmts.findDeepestWorkingAgent.get(sessionId, sessionId);
+}
+
+// Land a session that was cancelled with no hook (Esc) in the same
+// waiting + awaiting-input state a normal Stop produces, and log a timeline
+// event. Used by both watchdog recovery paths: the transcript-marker path
+// (interrupt after some output) and the idle-timeout path (interrupt before
+// any output, which leaves no marker at all). Caller is responsible for the
+// gating (agent must be "working" and not already awaiting).
+function recoverInterruptedSession(sessionId, fullSess, mainAgentId, reasonSuffix) {
+  const ts = new Date().toISOString();
+  if (mainAgentId) {
+    stmts.updateAgent.run(null, "waiting", null, null, null, null, mainAgentId);
+  }
+  stmts.setSessionAwaitingInput.run(ts, "interrupted", sessionId);
+  if (mainAgentId) stmts.setAgentAwaitingInput.run(ts, "interrupted", mainAgentId);
+
+  const label = fullSess?.name || `Session ${sessionId.slice(0, 8)}`;
+  const summary = reasonSuffix ? `${label} - ${reasonSuffix}` : `${label} - interrupted by user`;
+  stmts.insertEvent.run(sessionId, mainAgentId, "Interrupted", null, summary, null);
+
+  broadcast("session_updated", stmts.getSession.get(sessionId));
+  if (mainAgentId) broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+  broadcast("new_event", {
+    session_id: sessionId,
+    agent_id: mainAgentId,
+    event_type: "Interrupted",
+    tool_name: null,
+    summary,
+    created_at: ts,
+  });
+}
+
+/**
+ * Finds or creates the session/main-agent pair for a validated hook envelope,
+ * then applies one-shot collector metadata such as transcript and repository
+ * identity fields.
+ *
+ * @param {string} sessionId Session identifier from the hook payload.
+ * @param {Record<string, unknown>} data Sanitized hook payload.
+ * @returns {object|null} Current session row, or null after a failed insert.
+ */
+function ensureSession(sessionId, data, origin = null) {
+  let session = stmts.getSession.get(sessionId);
+  const repoRemoteUrl = sanitizeRepoRemoteUrl(data.repo_remote_url);
+  const cursorSession =
+    data.provider === "cursor" ||
+    (typeof data.transcript_path === "string" && isCursorTranscriptPath(data.transcript_path));
+  if (!session) {
+    stmts.insertSession.run(
+      sessionId,
+      data.session_name || `Session ${sessionId.slice(0, 8)}`,
+      "active",
+      data.cwd || null,
+      data.model || null,
+      null
+    );
+    if (cursorSession) setSessionProviderStmt.run("cursor", sessionId);
+    // A hook that proved REMOTE_PUSH_TOKEN (see POST /event) comes from
+    // another machine: birth the row as remote-push owned so the same
+    // collector's POST /ingest-batch can enrich it with tokens/tool events.
+    // Decided once, at creation only -- an existing row is never relabelled,
+    // so a remote caller still cannot take over a locally-managed session.
+    if (origin && origin.remotePush) {
+      stmts.setSessionSource.run(REMOTE_PUSH_SOURCE, sessionId);
+      if (REMOTE_PROVIDERS.includes(data.provider) && data.provider !== "claude") {
+        setSessionProviderStmt.run(data.provider, sessionId);
+      }
+    }
+    session = stmts.getSession.get(sessionId);
+    if (!session) {
+      console.error(`[HOOKS] Failed to create session ${sessionId} — insert returned no row`);
+      return null;
+    }
+    // Persist collector identity before publishing the newly created row. A
+    // live subscriber must receive the same session shape a subsequent REST
+    // read gets, rather than a partial pre-enrichment snapshot.
+    if (repoRemoteUrl) {
+      stmts.setSessionRepoRemoteUrl.run(repoRemoteUrl, sessionId);
+      session = stmts.getSession.get(sessionId);
+    }
+    broadcast("session_created", session);
+
+    // Create main agent for new session
+    const mainAgentId = `${sessionId}-main`;
+    const sessionLabel = session.name || `Session ${sessionId.slice(0, 8)}`;
+    stmts.insertAgent.run(
+      mainAgentId,
+      sessionId,
+      `Main Agent - ${sessionLabel}`,
+      "main",
+      null,
+      "working",
+      null,
+      null,
+      null
+    );
+    const mainAgent = stmts.getAgent.get(mainAgentId);
+    if (mainAgent) broadcast("agent_created", mainAgent);
+  }
+
+  // First-seen transcript_path → write to session row so the periodic sweep
+  // doesn't have to scan events for it. Idempotent via the SQL guard
+  // (NULL/'' check), so subsequent hooks for the same session are no-ops.
+  // Type guard: hook payloads are unvalidated JSON — a non-string value would
+  // make better-sqlite3 throw inside the surrounding processEvent transaction.
+  if (typeof data.transcript_path === "string" && data.transcript_path) {
+    stmts.setSessionTranscriptPath.run(data.transcript_path, sessionId);
+  }
+  // Cursor currently emits the Claude-compatible hook envelope but stores its
+  // transcript under ~/.cursor. Provider identity must therefore come from the
+  // durable transcript path, not from the event names. Repair pre-v2.2.2 rows
+  // on their very next hook as well as classifying newly created rows.
+  if (cursorSession && session.provider !== "cursor") {
+    setSessionProviderStmt.run("cursor", sessionId);
+    session = stmts.getSession.get(sessionId);
+  }
+  // The local hook is authenticated before it reaches this route. Persist the
+  // first collector-observed Git remote as opaque metadata; presentation
+  // clients own URL canonicalization and matching policy.
+  if (repoRemoteUrl && session.repo_remote_url !== repoRemoteUrl) {
+    stmts.setSessionRepoRemoteUrl.run(repoRemoteUrl, sessionId);
+  }
+  return session;
+}
+
+function getMainAgent(sessionId) {
+  return stmts.getAgent.get(`${sessionId}-main`);
+}
+
+/**
+ * True when `name` is an auto-generated / placeholder label rather than a
+ * meaningful title the user picked. Covers:
+ *   - empty / null
+ *   - the hook fallback "Session <id8>"
+ *   - the import-history fallbacks derived from cwd ("<folder>", "<folder> -
+ *     <id8>", "<folder> (<slug>)")
+ * Such names are safe to overwrite with a transcript-derived ai-title; a real
+ * user-chosen name is not.
+ */
+const REMOTE_LABEL_RE = /^(\[[^\]\n]{1,40}\]) /;
+/**
+ * Push-owned sessions are named "[machine] <title>" by the collector. Split that label off so title
+ * syncing can treat the remainder as the name while keeping the label on every write.
+ */
+function splitRemoteLabel(session) {
+  const name = (session && session.name) || "";
+  const m = session && session.source === REMOTE_PUSH_SOURCE ? REMOTE_LABEL_RE.exec(name) : null;
+  return m ? { label: `${m[1]} `, bare: name.slice(m[0].length) } : { label: "", bare: name };
+}
+
+function isAutoSessionName(name, sessionId, cwd) {
+  if (!name || !name.trim()) return true;
+  if (name === `Session ${sessionId.slice(0, 8)}`) return true;
+  if (cwd) {
+    const base = require("path").basename(cwd);
+    if (base && (name === base || name.startsWith(`${base} - `) || name.startsWith(`${base} (`))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Short display label derived from the transcript's first user prompt.
+ * Mirrors the 60-char subagent-name truncation used in PreToolUse so
+ * descriptor-named rows read consistently across the board.
+ */
+function firstUserLabel(result) {
+  const raw = result && typeof result.firstUserMessage === "string" ? result.firstUserMessage : "";
+  const text = raw.trim();
+  if (!text) return null;
+  return text.length > 60 ? text.slice(0, 57) + "..." : text;
+}
+
+/**
+ * True when the main agent's name is still an auto-generated label:
+ * "Main Agent" (seed/API fallback) or "Main Agent - <auto session label>"
+ * (hook / import creation paths). A suffix that is a real title — or the
+ * user's own rename — makes the name non-auto and it is never overwritten.
+ */
+function isAutoMainAgentName(name, sessionId, cwd) {
+  if (!name || !name.trim()) return true;
+  if (name === "Main Agent") return true;
+  const prefix = "Main Agent - ";
+  if (name.startsWith(prefix)) return isAutoSessionName(name.slice(prefix.length), sessionId, cwd);
+  return false;
+}
+
+/**
+ * Keep sessions.name in sync with the transcript's human-readable title.
+ * Source of truth lives in the JSONL as `custom-title` (explicit /rename,
+ * `claude -n`, picker Ctrl+R) and `ai-title` (auto / plan-accept) lines, which
+ * the TranscriptCache surfaces on every extract. Precedence: an explicit
+ * custom title always wins; an ai-title only fills in when the current name is
+ * still an auto/placeholder label (so a name the user set in the dashboard or
+ * via /rename is never clobbered by the auto-generated title). A name that
+ * equals the first-user-prompt descriptor (applied by
+ * applyFirstUserDescriptor when no title existed yet) counts as replaceable
+ * too — the descriptor sits BELOW both title kinds, so a later ai-title must
+ * still be able to take over. Broadcasts session_updated only on a real
+ * change so the UI updates in real time.
+ */
+function syncSessionName(session, result) {
+  if (!session || !result) return;
+  const custom = result.customTitle && result.customTitle.trim();
+  const ai = result.aiTitle && result.aiTitle.trim();
+  const title = custom || ai || null;
+  if (!title) return;
+  // Push-owned sessions carry a collector label ("[remote] ..."); judge and replace only the part
+  // after it, and keep the label on whatever name we write.
+  const { label, bare } = splitRemoteLabel(session);
+  const desired = label + title;
+  const replaceable =
+    isAutoSessionName(bare, session.id, session.cwd) || bare === firstUserLabel(result);
+  if (!custom && !replaceable) return;
+  const upd = stmts.updateSessionName.run(desired, session.id, desired);
+  if (upd.changes > 0) {
+    const refreshed = stmts.getSession.get(session.id);
+    if (refreshed) broadcast("session_updated", refreshed);
+  }
+}
+
+/**
+ * Fallback descriptor from the session's first user prompt (issue #201).
+ * Fills sessions.name and the main agent's name/task ONLY while those fields
+ * still hold their auto-generated placeholders, so a custom-title, ai-title,
+ * or user-set name is never clobbered. Must run strictly AFTER
+ * syncSessionName within the same pass: title sync gets first claim on the
+ * name, and this helper re-reads the rows so it sees the result. Idempotent —
+ * once applied (or once real names exist), every subsequent call is a no-op
+ * with no broadcast.
+ */
+function applyFirstUserDescriptor(sessionId, result) {
+  const label = firstUserLabel(result);
+  if (!label) return;
+
+  // A transcript title already had its turn in syncSessionName. It can look
+  // like a placeholder (a /rename to the project folder's name matches the
+  // cwd-basename fallback), so never let the descriptor take the name back.
+  const hasTitle = Boolean(
+    (result.customTitle && result.customTitle.trim()) || (result.aiTitle && result.aiTitle.trim())
+  );
+  const session = stmts.getSession.get(sessionId);
+  const split = splitRemoteLabel(session);
+  if (session && !hasTitle && isAutoSessionName(split.bare, session.id, session.cwd)) {
+    const desiredName0 = split.label + label;
+    const upd = stmts.updateSessionName.run(desiredName0, session.id, desiredName0);
+    if (upd.changes > 0) {
+      const refreshed = stmts.getSession.get(session.id);
+      if (refreshed) broadcast("session_updated", refreshed);
+    }
+  }
+
+  const mainAgent = getMainAgent(sessionId);
+  if (!mainAgent) return;
+  const desiredName = `Main Agent - ${label}`;
+  const fillName =
+    isAutoMainAgentName(mainAgent.name, sessionId, session?.cwd) && mainAgent.name !== desiredName;
+  const fillTask = !mainAgent.task || !String(mainAgent.task).trim();
+  if (!fillName && !fillTask) return;
+  // updateAgent writes current_tool VERBATIM (no COALESCE) — pass the
+  // existing value through, or this out-of-band update would wipe an
+  // in-flight tool mid-turn.
+  stmts.updateAgent.run(
+    fillName ? desiredName : null,
+    null,
+    fillTask ? result.firstUserMessage : null,
+    mainAgent.current_tool,
+    null,
+    null,
+    mainAgent.id
+  );
+  const refreshedAgent = stmts.getAgent.get(mainAgent.id);
+  if (refreshedAgent) broadcast("agent_updated", refreshedAgent);
+}
+
+/**
+ * Persist a deliberately small, latest-two-turn card summary alongside the
+ * session. The complete transcript remains in its JSONL file; this value only
+ * makes the dashboard and Kanban cards equally informative for Claude and
+ * Codex after a restart or historical import. TranscriptCache has already
+ * filtered command plumbing, tool results, interruptions, and duplicates.
+ */
+function syncCardPromptPreview(sessionId, result) {
+  const prompts = Array.isArray(result?.recentUserMessages) ? result.recentUserMessages : [];
+  const preview = prompts.filter(Boolean).join("\n");
+  if (!preview) return;
+  const upd = stmts.updateSessionCardPromptPreview.run(preview, sessionId, preview);
+  if (upd.changes > 0) {
+    const refreshed = stmts.getSession.get(sessionId);
+    if (refreshed) broadcast("session_updated", refreshed);
+  }
+}
+
+/**
+ * Processes and durably records one hook event in a SQLite transaction.
+ * Collector-provided repository identity is normalized before any writer sees
+ * the payload, including the full envelope retained in `events.data`.
+ *
+ * @param {string} hookType Canonical hook event type.
+ * @param {Record<string, unknown>} data Hook payload.
+ * @returns {object|null} Broadcast-ready event, or null without a session id.
+ */
+const processEvent = db.transaction((hookType, data, origin = null) => {
+  // `events.data` stores the entire hook envelope. Normalize the field before
+  // ANY downstream work so its original userinfo cannot bypass the sanitized
+  // session column through this separate durable persistence path.
+  if (Object.prototype.hasOwnProperty.call(data, "repo_remote_url")) {
+    const repoRemoteUrl = sanitizeRepoRemoteUrl(data.repo_remote_url);
+    data = { ...data };
+    if (repoRemoteUrl) data.repo_remote_url = repoRemoteUrl;
+    else delete data.repo_remote_url;
+  }
+  const sessionId = data.session_id;
+  if (!sessionId) return null;
+
+  const session = ensureSession(sessionId, data, origin);
+
+  // Remote household hooks (aideck-hook.js on other machines) cannot rely on
+  // the transcript being readable on THIS host (the JSONL lives on the remote
+  // machine's disk). They extract the transcript title locally and send it
+  // inline; apply it through the same precedence rules as the TranscriptCache
+  // path (custom wins, ai-title only fills auto/placeholder names).
+  if (data.remote_custom_title || data.remote_ai_title) {
+    syncSessionName(session, {
+      customTitle:
+        typeof data.remote_custom_title === "string"
+          ? data.remote_custom_title.slice(0, 200)
+          : null,
+      aiTitle: typeof data.remote_ai_title === "string" ? data.remote_ai_title.slice(0, 200) : null,
+    });
+  }
+
+  let mainAgent = getMainAgent(sessionId);
+  const mainAgentId = mainAgent?.id ?? null;
+
+  // Reactivate non-active sessions when we receive hook events proving the session is alive.
+  // - UserPromptSubmit and PreToolUse always reactivate (user actively retried, even from error).
+  // - Other work events (PostToolUse, Notification, SessionStart) reactivate non-error sessions.
+  // - Stop/SubagentStop reactivate only if session is completed/abandoned — this handles
+  //   sessions imported as "completed" before the server started, where the first hook event
+  //   might be a Stop. For error sessions, Stop should NOT reactivate.
+  // - SessionEnd never reactivates.
+  const isUserAction = hookType === "UserPromptSubmit" || hookType === "PreToolUse";
+  // RemoteSync (POST /ingest-transcript) only refreshes derived data; it never changes liveness.
+  const isNonTerminalEvent = hookType !== "SessionEnd" && hookType !== "RemoteSync";
+  const isStopLike = hookType === "Stop" || hookType === "SubagentStop";
+  const isImportedOrAbandoned = session.status === "completed" || session.status === "abandoned";
+  const needsReactivation =
+    session.status !== "active" &&
+    isNonTerminalEvent &&
+    (isUserAction ||
+      (!isStopLike && session.status !== "error") ||
+      (isStopLike && isImportedOrAbandoned));
+  if (needsReactivation) {
+    stmts.reactivateSession.run(sessionId);
+    broadcast("session_updated", stmts.getSession.get(sessionId));
+
+    if (mainAgent && mainAgent.status !== "working") {
+      stmts.reactivateAgent.run(mainAgentId);
+      mainAgent = stmts.getAgent.get(mainAgentId);
+      broadcast("agent_updated", mainAgent);
+    }
+  }
+
+  let eventType = hookType;
+  let toolName = data.tool_name || null;
+  let summary = null;
+  let agentId = mainAgentId;
+
+  // NOTE: clearing of awaiting_input_since is handled per-case below rather
+  // than blanket-clearing on every non-Notification event. The blanket rule
+  // caused spontaneous waiting → active flips when *any* hook arrived after
+  // a Stop — most commonly SubagentStop for backgrounded subagents, but
+  // also occasionally a late PostToolUse from a background tool. A subagent
+  // or background tool finishing tells us nothing about whether the human
+  // has actually responded, so those events must NOT clear the flag.
+
+  switch (hookType) {
+    case "PreToolUse": {
+      summary = `Using tool: ${toolName}`;
+
+      // PreToolUse means Claude is actively running a tool, ergo the user
+      // has resumed (Stop only fires at end of turn — Claude can't start a
+      // new tool call without fresh user input). Clear waiting now — UNLESS a
+      // background subagent is the actor and main is blocked on the user
+      // (reason='notification'), in which case the flag is preserved
+      // (clearAwaitingInputRespectingActor). Computed before the clear because
+      // the Agent-spawn branch below mutates agent rows.
+      clearAwaitingInputRespectingActor(
+        sessionId,
+        mainAgentId,
+        subagentIsActorNow(sessionId, mainAgent),
+        true
+      );
+
+      // If the tool is Agent, a subagent is being created
+      if (toolName === "Agent") {
+        const input = data.tool_input || {};
+        const subId = uuidv4();
+        // Use description, then type, then first line of prompt, then fallback
+        const rawName =
+          input.description ||
+          input.subagent_type ||
+          (input.prompt ? input.prompt.split("\n")[0].slice(0, 60) : null) ||
+          "Subagent";
+        const subName = rawName.length > 60 ? rawName.slice(0, 57) + "..." : rawName;
+
+        // Infer which agent is spawning this subagent.
+        // Hook events don't carry an explicit agent ID, so we use a heuristic:
+        //   - If the main agent is actively working, it's the one spawning (common case).
+        //   - If the main agent is waiting (for user or subagent results),
+        //     the spawn must come from an already-running subagent — pick the deepest
+        //     working subagent (most recently nested active agent).
+        //   - Fallback to main if nothing else matches.
+        let parentId = mainAgentId;
+        if (mainAgent && mainAgent.status !== "working") {
+          const deepest = stmts.findDeepestWorkingAgent.get(sessionId, sessionId);
+          if (deepest) {
+            parentId = deepest.id;
+          }
+        }
+
+        stmts.insertAgent.run(
+          subId,
+          sessionId,
+          subName,
+          "subagent",
+          input.subagent_type || null,
+          "working",
+          input.prompt ? input.prompt.slice(0, 500) : null,
+          parentId,
+          input.metadata ? JSON.stringify(input.metadata) : null
+        );
+        broadcast("agent_created", stmts.getAgent.get(subId));
+        agentId = subId;
+        summary = `Subagent spawned: ${subName}`;
+      }
+
+      // Update main agent status to "working" — but only when main is the likely
+      // actor. When main is waiting and working subagents exist, PreToolUse events
+      // come from subagents, not main. Incorrectly promoting main to "working"
+      // would break parent inference for nested agent spawning.
+      //
+      // Heuristic: main is waiting + working subagents exist → subagent is the actor.
+      //            main is working/waiting with no subagents → main is the actor.
+      const deepestWorking =
+        mainAgent && mainAgent.status === "waiting"
+          ? stmts.findDeepestWorkingAgent.get(sessionId, sessionId)
+          : null;
+      const subagentIsActor = !!deepestWorking;
+      if (subagentIsActor && toolName !== "Agent") {
+        agentId = deepestWorking.id;
+      }
+      if (
+        mainAgent &&
+        !subagentIsActor &&
+        (mainAgent.status === "working" || mainAgent.status === "waiting")
+      ) {
+        stmts.updateAgent.run(null, "working", null, toolName, null, null, mainAgentId);
+        broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+      }
+      break;
+    }
+
+    case "PostToolUse": {
+      summary = `Tool completed: ${toolName}`;
+
+      // Clear waiting too. The non-obvious case this covers: a permission
+      // Notification fires *between* PreToolUse and PostToolUse (when Claude
+      // Code prompts the user mid-tool). The Notification stamps waiting,
+      // the user approves, the tool completes, PostToolUse arrives. Without
+      // a clear here, we'd be stuck in waiting until the next PreToolUse.
+      // Same actor-guard as PreToolUse: a background subagent's PostToolUse
+      // must not clear a genuine 'notification' wait held by the main agent.
+      clearAwaitingInputRespectingActor(
+        sessionId,
+        mainAgentId,
+        subagentIsActorNow(sessionId, mainAgent),
+        true
+      );
+
+      // NOTE: PostToolUse for "Agent" tool fires immediately when a subagent is
+      // backgrounded — it does NOT mean the subagent finished its work.
+      // Subagent completion is handled by SubagentStop, not here.
+
+      // Attribute to the working subagent when main is waiting (same heuristic as PreToolUse).
+      if (mainAgent && mainAgent.status === "waiting" && toolName !== "Agent") {
+        const deepest = stmts.findDeepestWorkingAgent.get(sessionId, sessionId);
+        if (deepest) {
+          agentId = deepest.id;
+        }
+      }
+
+      // Only clear current_tool on the main agent if it's actively working.
+      // Skip if waiting (waiting for subagents) or already completed.
+      if (mainAgent && mainAgent.status === "working") {
+        stmts.updateAgent.run(null, null, null, null, null, null, mainAgentId);
+        broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+      }
+      break;
+    }
+
+    case "Stop": {
+      const session = stmts.getSession.get(sessionId);
+      const sessionLabel = session?.name || `Session ${sessionId.slice(0, 8)}`;
+      summary =
+        data.stop_reason === "error"
+          ? `Error in ${sessionLabel}`
+          : `${sessionLabel} - ready for input`;
+
+      // Stop means Claude finished its turn, NOT that the session is closed.
+      // Session stays active — user can still send more messages.
+      // Background subagents may still be running — do NOT complete them
+      // here. They complete via SubagentStop, or all at once on SessionEnd.
+      //
+      // CRITICAL: do all DB writes BEFORE any broadcast, then broadcast the
+      // final state once. An earlier version broadcast agent_updated twice
+      // which made the agent flicker out of every Kanban column for a
+      // tick — visible to users as "agent skipped waiting and went to
+      // completed".
+      const now = new Date().toISOString();
+      const agentMutable =
+        !!mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error";
+
+      if (data.stop_reason === "error") {
+        if (agentMutable) {
+          stmts.updateAgent.run(null, "error", null, null, null, null, mainAgentId);
+        }
+        stmts.updateSession.run(null, "error", now, null, sessionId);
+        // Error stop is terminal-ish — drop any waiting flag so the row
+        // lands cleanly in the Error column.
+        clearAwaitingInput(sessionId, mainAgentId, false);
+      } else {
+        if (agentMutable) {
+          stmts.updateAgent.run(null, "waiting", null, null, null, null, mainAgentId);
+        }
+        // Stamp the waiting flag in the same DB pass as the status update so
+        // the post-write read returns a consistent (waiting, awaiting=set)
+        // row.
+        stmts.setSessionAwaitingInput.run(now, "stop", sessionId);
+        if (mainAgentId) stmts.setAgentAwaitingInput.run(now, "stop", mainAgentId);
+      }
+
+      // Now broadcast — single agent_updated reflecting the final state.
+      broadcast("session_updated", stmts.getSession.get(sessionId));
+      if (mainAgentId) {
+        broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+      }
+      break;
+    }
+
+    case "SubagentStop": {
+      summary = `Subagent completed`;
+      const subagents = stmts.listAgentsBySession.all(sessionId);
+      let matchingSub = null;
+
+      // Try to identify which subagent stopped using available data.
+      // SubagentStop provides: agent_type (e.g. "Explore", "test-engineer"),
+      // agent_id (Claude's internal ID), description, last_assistant_message.
+      const subDesc = data.description || data.agent_type || data.subagent_type || null;
+      if (subDesc) {
+        const namePrefix = subDesc.length > 57 ? subDesc.slice(0, 57) : subDesc;
+        matchingSub = subagents.find(
+          (a) => a.type === "subagent" && a.status === "working" && a.name.startsWith(namePrefix)
+        );
+      }
+
+      // Try matching by agent_type against stored subagent_type
+      if (!matchingSub && data.agent_type) {
+        matchingSub = subagents.find(
+          (a) =>
+            a.type === "subagent" && a.status === "working" && a.subagent_type === data.agent_type
+        );
+      }
+
+      if (!matchingSub) {
+        const prompt = data.prompt ? data.prompt.slice(0, 500) : null;
+        if (prompt) {
+          matchingSub = subagents.find(
+            (a) => a.type === "subagent" && a.status === "working" && a.task === prompt
+          );
+        }
+      }
+
+      // Fallback: oldest working subagent
+      if (!matchingSub) {
+        matchingSub = subagents.find((a) => a.type === "subagent" && a.status === "working");
+      }
+
+      if (matchingSub) {
+        stmts.updateAgent.run(
+          null,
+          "completed",
+          null,
+          null,
+          new Date().toISOString(),
+          null,
+          matchingSub.id
+        );
+        broadcast("agent_updated", stmts.getAgent.get(matchingSub.id));
+        agentId = matchingSub.id;
+        summary = `Subagent completed: ${matchingSub.name}`;
+
+        // Session stays active — SubagentStop just means one subagent finished,
+        // the session is not over until the user explicitly closes it.
+      }
+      break;
+    }
+
+    case "SessionStart": {
+      summary = data.source === "resume" ? "Session resumed" : "Session started";
+
+      // Claude Code fires SessionStart with source ∈ startup|resume|clear|compact.
+      // 'compact' is the odd one out: it fires MID-TURN when auto-compaction
+      // kicks in while Claude is actively working, so the session is NOT sitting
+      // at an empty prompt. Preserve the pre-compaction state verbatim — a
+      // session compacting mid-turn is genuinely Active (main agent 'working',
+      // no awaiting flag) and must stay Active; one that compacted while idle was
+      // already Waiting (awaiting flag from the prior Stop) and must stay Waiting.
+      // Without this guard a mid-turn compact stamps 'session_start' and flips a
+      // genuinely-working session to Waiting. startup/resume/clear DO land at a
+      // fresh prompt, so they still stamp the Waiting flag below.
+      if (data.source !== "compact") {
+        // Reactivation is already handled above for non-active sessions.
+        // Promote main agent from waiting → working if needed.
+        if (mainAgent && mainAgent.status === "waiting") {
+          stmts.updateAgent.run(null, "working", null, null, null, null, mainAgentId);
+        }
+
+        // A just-started or just-resumed session is sitting at a prompt
+        // waiting for the user's first message — Claude Code hasn't done
+        // anything yet. Stamp awaiting_input_since so it lands in Waiting
+        // from the moment the dashboard sees it. UserPromptSubmit (when the
+        // user hits enter) or PreToolUse (when Claude actually runs a tool)
+        // will clear the flag.
+        const sessionStartTs = new Date().toISOString();
+        stmts.setSessionAwaitingInput.run(sessionStartTs, "session_start", sessionId);
+        if (mainAgentId)
+          stmts.setAgentAwaitingInput.run(sessionStartTs, "session_start", mainAgentId);
+      }
+
+      // Single broadcast pair with the final state — for non-compact sources the
+      // waiting flag is now set; for compact the pre-existing state is untouched.
+      // WS clients see the correct badge as soon as the SessionStart event lands.
+      broadcast("session_updated", stmts.getSession.get(sessionId));
+      if (mainAgentId) broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+
+      // Clean up orphaned sessions: when a user runs /resume inside a session,
+      // the parent session never receives Stop or SessionEnd. Mark any active
+      // session that hasn't seen events for STALE_MINUTES as abandoned.
+      const staleSessions = stmts.findStaleSessions.all(
+        sessionId,
+        STALE_MINUTES,
+        STALE_MINUTES,
+        STALE_MINUTES
+      );
+      const now = new Date().toISOString();
+      for (const stale of staleSessions) {
+        const staleAgents = stmts.listAgentsBySession.all(stale.id);
+        for (const agent of staleAgents) {
+          if (agent.status !== "completed" && agent.status !== "error") {
+            stmts.updateAgent.run(null, "completed", null, null, now, null, agent.id);
+            broadcast("agent_updated", stmts.getAgent.get(agent.id));
+          }
+        }
+        stmts.updateSession.run(null, "abandoned", now, null, stale.id);
+        broadcast("session_updated", stmts.getSession.get(stale.id));
+      }
+      break;
+    }
+
+    case "SessionEnd": {
+      const endSession = stmts.getSession.get(sessionId);
+      const endLabel = endSession?.name || `Session ${sessionId.slice(0, 8)}`;
+      summary = `Session closed: ${endLabel}`;
+
+      // Session is terminating — drop any waiting flag so the row lands in
+      // its final column without a leftover yellow overlay.
+      clearAwaitingInput(sessionId, mainAgentId, false);
+
+      // SessionEnd is the definitive signal that the CLI process exited.
+      // Keep `error` ONLY if the error is still unrecovered at the transcript
+      // tail. A transient API error that the CLI retried past (successful turns
+      // after it) has recovered, so exiting after a long healthy run must land
+      // as `completed`, not a stale `error` frozen from days earlier.
+      const endResult = data.transcript_path ? transcriptCache.extract(data.transcript_path) : null;
+      const finalSessionStatus =
+        endSession?.status === "error" && isErrorAtTail(endResult) ? "error" : "completed";
+      const allAgents = stmts.listAgentsBySession.all(sessionId);
+      const now = new Date().toISOString();
+      for (const agent of allAgents) {
+        if (agent.status !== "completed" && agent.status !== "error") {
+          const agentFinal = finalSessionStatus === "error" ? "error" : "completed";
+          stmts.updateAgent.run(null, agentFinal, null, null, now, null, agent.id);
+          broadcast("agent_updated", stmts.getAgent.get(agent.id));
+        }
+      }
+      stmts.updateSession.run(null, finalSessionStatus, now, null, sessionId);
+      broadcast("session_updated", stmts.getSession.get(sessionId));
+
+      break;
+    }
+
+    case "UserPromptSubmit": {
+      // User just hit enter on a new prompt. This is the unambiguous
+      // "session resumed" signal — fires before Claude does anything,
+      // unlike PreToolUse which only fires for tool-using turns. Clear
+      // the Waiting flag and promote the main agent to Working so the
+      // dashboard reflects "Claude is now thinking on this" through the
+      // entire response, including text-only replies that emit no
+      // PreToolUse before Stop.
+      summary = "User prompt submitted";
+      clearAwaitingInput(sessionId, mainAgentId, true);
+      if (mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error") {
+        stmts.updateAgent.run(null, "working", null, null, null, null, mainAgentId);
+        broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+      }
+      break;
+    }
+
+    case "Notification": {
+      const msg = data.message || "Notification received";
+      // Tag compaction-related notifications so they show as Compaction events.
+      // The label is independent of blocking state: a RECOGNIZED blocking type
+      // (e.g. a permission_prompt whose tool name happens to contain
+      // "compress") must still raise Waiting. Everything else -- no type, an
+      // unknown future type, an empty string -- keeps the legacy precedence:
+      // a compaction-looking message is never blocking.
+      const isCompaction = /compact|compress|context.*(reduc|truncat|summar)/i.test(msg);
+      const recognizedBlockingType =
+        typeof data.notification_type === "string" &&
+        BLOCKING_NOTIFICATION_TYPES.has(data.notification_type);
+      if (isCompaction) {
+        eventType = "Compaction";
+      }
+      summary = msg;
+      if ((!isCompaction || recognizedBlockingType) && isBlockingNotification(data, msg)) {
+        // Claude Code is blocked waiting for the user (permission prompt or
+        // explicit "waiting for input" notice). Stamp session + main agent
+        // so the dashboard can surface a yellow "Waiting" badge until the
+        // user responds — at which point the next PreToolUse/Stop clears it.
+        const ts = new Date().toISOString();
+        stmts.setSessionAwaitingInput.run(ts, "notification", sessionId);
+        broadcast("session_updated", stmts.getSession.get(sessionId));
+        if (mainAgentId) {
+          stmts.updateAgent.run(null, "waiting", null, null, null, null, mainAgentId);
+          stmts.setAgentAwaitingInput.run(ts, "notification", mainAgentId);
+          broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+        }
+      }
+      break;
+    }
+
+    default: {
+      summary = `Event: ${hookType}`;
+    }
+  }
+
+  // Extract token usage from transcript on every event that provides transcript_path.
+  // Claude Code hooks don't include usage/model in stdin — the main and flat
+  // subagent transcript JSONLs are the only reliable source. Uses
+  // replaceTokenUsage with compaction-aware logic:
+  // when the JSONL total drops (compaction rewrote it), the old value rolls into
+  // a baseline column so effective_total = current_jsonl + baseline. This ensures
+  // tokens from before compaction are never lost.
+  //
+  // Also detects compaction events (isCompactSummary in JSONL) and creates a
+  // Compaction agent + event so the dashboard shows when context was compressed.
+  if (data.transcript_path) {
+    const result = transcriptCache.extract(data.transcript_path);
+    if (result) {
+      const { compaction, latestModel } = result;
+
+      // Keep session.model in sync with the user's *current* model — the
+      // transcript's most recent assistant entry is the source of truth, since
+      // the /model command rewrites future entries but leaves session.model
+      // (set at session creation) alone. The prepared statement is a no-op
+      // when the value is unchanged, so we only broadcast on real flips.
+      if (latestModel) {
+        const upd = stmts.updateSessionModel.run(latestModel, sessionId, latestModel);
+        if (upd.changes > 0) {
+          const refreshed = stmts.getSession.get(sessionId);
+          if (refreshed) broadcast("session_updated", refreshed);
+        }
+      }
+
+      // Keep the displayed session name in sync with the transcript title
+      // (set via /rename, `claude -n`, or the auto ai-title). Re-read the row
+      // so we see any name set earlier in this same transaction.
+      syncSessionName(stmts.getSession.get(sessionId), result);
+
+      // Then let the first user prompt fill whatever placeholders remain
+      // (session name, main agent name/task). Runs on every transcript-bearing
+      // event — live on UserPromptSubmit, and as backfill for sessions that
+      // never get a title (including imported ones) on any later event.
+      applyFirstUserDescriptor(sessionId, result);
+      syncCardPromptPreview(sessionId, result);
+
+      // Register compaction agents and events.
+      // Each isCompactSummary entry in the JSONL = one compaction that occurred.
+      // Deduplicate by uuid so we only create once per compaction.
+      if (compaction) {
+        for (const entry of compaction.entries) {
+          const compactId = `${sessionId}-compact-${entry.uuid}`;
+          if (stmts.getAgent.get(compactId)) continue;
+
+          const ts = entry.timestamp || new Date().toISOString();
+          stmts.insertAgent.run(
+            compactId,
+            sessionId,
+            "Context Compaction",
+            "subagent",
+            "compaction",
+            "completed",
+            "Automatic conversation context compression",
+            mainAgentId,
+            null
+          );
+          // Compaction is an instantaneous transition. Stamp started_at and
+          // ended_at to the same transcript timestamp so duration is exactly 0.
+          // Without this, insertAgent's default started_at = NOW (ingestion
+          // wall clock) is paired with ended_at = ts (transcript time in the
+          // past), producing impossible negative durations (issue #156).
+          db.prepare(
+            "UPDATE agents SET started_at = ?, ended_at = ?, updated_at = ? WHERE id = ?"
+          ).run(ts, ts, ts, compactId);
+          broadcast("agent_created", stmts.getAgent.get(compactId));
+
+          const compactSummary = `Context compacted - conversation history compressed (#${compaction.entries.indexOf(entry) + 1})`;
+          stmts.insertEvent.run(
+            sessionId,
+            compactId,
+            "Compaction",
+            null,
+            compactSummary,
+            JSON.stringify({
+              uuid: entry.uuid,
+              timestamp: ts,
+              compaction_number: compaction.entries.indexOf(entry) + 1,
+              total_compactions: compaction.count,
+            })
+          );
+          broadcast("new_event", {
+            session_id: sessionId,
+            agent_id: compactId,
+            event_type: "Compaction",
+            tool_name: null,
+            summary: compactSummary,
+            created_at: ts,
+          });
+        }
+      }
+
+      // Register API errors from transcript (quota limits, rate limits, overloaded, etc.)
+      if (result.errors) {
+        let newErrorRecorded = false;
+        for (const apiErr of result.errors) {
+          // Deduplicate: check if we already recorded this error (same type+message+timestamp)
+          const errKey = `${apiErr.type}:${apiErr.timestamp || ""}`;
+          const existing = db
+            .prepare(
+              `SELECT 1 FROM events WHERE session_id = ? AND event_type = 'APIError'
+               AND summary = ? LIMIT 1`
+            )
+            .get(sessionId, `${apiErr.type}: ${apiErr.message}`);
+          if (existing) continue;
+
+          stmts.insertEvent.run(
+            sessionId,
+            mainAgentId,
+            "APIError",
+            null,
+            `${apiErr.type}: ${apiErr.message}`,
+            JSON.stringify(apiErr)
+          );
+          broadcast("new_event", {
+            session_id: sessionId,
+            agent_id: mainAgentId,
+            event_type: "APIError",
+            tool_name: null,
+            summary: `${apiErr.type}: ${apiErr.message}`,
+            created_at: apiErr.timestamp || new Date().toISOString(),
+          });
+          newErrorRecorded = true;
+        }
+
+        // Flip to error only when we recorded a NEW error this call AND that
+        // error is still unrecovered at the transcript tail (isErrorAtTail).
+        // The APIError events are always kept for history, but a transient error
+        // the CLI already retried past (successful turns after it — e.g.
+        // "Connection closed mid-response" mid-run) must NOT trip the whole
+        // session to `error`; only a genuinely-current failure should. This is
+        // the primary guard against false Error flapping; the self-heal below is
+        // the safety net for sessions flipped by older builds. The
+        // newErrorRecorded gate also stops re-reads from yanking a recovered
+        // session back into error.
+        if (newErrorRecorded && isErrorAtTail(result)) {
+          const curSession = stmts.getSession.get(sessionId);
+          if (curSession && curSession.status === "active") {
+            stmts.updateSession.run(null, "error", null, null, sessionId);
+            broadcast("session_updated", stmts.getSession.get(sessionId));
+          }
+          if (mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error") {
+            stmts.updateAgent.run(null, "error", null, null, null, null, mainAgentId);
+            clearAwaitingInput(sessionId, mainAgentId, false);
+            broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+          }
+        }
+      }
+
+      // Self-heal a stale error on ANY hook event. If the session is marked
+      // `error` but the transcript has progressed past the last API error
+      // (successful turns after it — isErrorAtTail false), the error was
+      // transient and the session recovered. Normal recovery only fires on
+      // UserPromptSubmit/PreToolUse; an actively-running session that only emits
+      // Stop / SubagentStop / PostToolUse / Notification would otherwise stay
+      // `error` forever even as its transcript (and cost) keeps growing. This
+      // complements the watchdog, which only re-examines STALE sessions and so
+      // never reaches a busy one. isErrorAtTail is transcript-driven, so a
+      // genuinely current error (tail) is left in place.
+      {
+        const curSession = stmts.getSession.get(sessionId);
+        if (
+          hookType !== "RemoteSync" &&
+          curSession &&
+          curSession.status === "error" &&
+          !isErrorAtTail(result)
+        ) {
+          stmts.reactivateSession.run(sessionId);
+          broadcast("session_updated", stmts.getSession.get(sessionId));
+          const curMain = mainAgentId ? stmts.getAgent.get(mainAgentId) : null;
+          if (curMain && curMain.status === "error") {
+            stmts.reactivateAgent.run(mainAgentId);
+            broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+          }
+        }
+      }
+
+      // Register turn duration events from transcript
+      let insertedTurns = 0;
+      let insertedTurnMs = 0;
+      let reconciledTurnTotals = null;
+      if (result.turnDurations) {
+        const sessionForTurns = stmts.getSession.get(sessionId);
+        const fallbackStart = Date.parse(sessionForTurns?.started_at || "") || Date.now();
+        const turns = result.turnDurations.map((td, index) => ({
+          durationMs: td.durationMs,
+          turnId: td.turnId || null,
+          // Some Claude versions omit the timestamp. A session-relative fallback is
+          // deterministic across hook replays; turnId remains the primary identity.
+          timestamp: td.timestamp || new Date(fallbackStart + index).toISOString(),
+        }));
+
+        const insertTurn = (turn) => {
+          const summary = `Turn completed in ${(turn.durationMs / 1000).toFixed(1)}s`;
+          stmts.insertEventAt.run(
+            sessionId,
+            mainAgentId,
+            "TurnDuration",
+            null,
+            summary,
+            JSON.stringify({ durationMs: turn.durationMs, turnId: turn.turnId }),
+            turn.timestamp
+          );
+          return summary;
+        };
+
+        if (result.turnDurationsComplete) {
+          // A complete parse is authoritative. Rebuilding a non-canonical set repairs
+          // rows and counters inflated by older versions while preserving each real
+          // turn, including distinct timestamp-less turns with equal durations.
+          const existingTurns = db
+            .prepare(
+              `SELECT id, created_at, json_extract(data, '$.durationMs') AS duration_ms,
+                      json_extract(data, '$.turnId') AS turn_id
+               FROM events WHERE session_id = ? AND event_type = 'TurnDuration'
+               ORDER BY id ASC`
+            )
+            .all(sessionId);
+          const canonical =
+            existingTurns.length === turns.length &&
+            turns.every((turn, index) => {
+              const row = existingTurns[index];
+              return (
+                row.turn_id === turn.turnId &&
+                Number(row.duration_ms) === Number(turn.durationMs) &&
+                row.created_at === turn.timestamp
+              );
+            });
+
+          if (!canonical) {
+            // processEvent already runs in one transaction, so deletion and rebuild
+            // commit atomically with the hook event and repaired metadata below.
+            db.prepare(
+              "DELETE FROM events WHERE session_id = ? AND event_type = 'TurnDuration'"
+            ).run(sessionId);
+            for (const turn of turns) insertTurn(turn);
+          }
+          reconciledTurnTotals = {
+            count: turns.length,
+            durationMs: turns.reduce((total, turn) => total + turn.durationMs, 0),
+          };
+        } else {
+          // A capped parse only contains the newest turns, so it must never delete
+          // older persisted rows. Stable turn IDs make this append path replay-safe.
+          for (const turn of turns) {
+            const existing = turn.turnId
+              ? db
+                  .prepare(
+                    "SELECT 1 FROM events WHERE session_id = ? AND event_type = 'TurnDuration' AND json_extract(data, '$.turnId') = ? LIMIT 1"
+                  )
+                  .get(sessionId, turn.turnId)
+              : db
+                  .prepare(
+                    "SELECT 1 FROM events WHERE session_id = ? AND event_type = 'TurnDuration' AND created_at = ? AND json_extract(data, '$.durationMs') = ? LIMIT 1"
+                  )
+                  .get(sessionId, turn.timestamp, turn.durationMs);
+            if (existing) continue;
+
+            const summary = insertTurn(turn);
+            insertedTurns += 1;
+            insertedTurnMs += turn.durationMs;
+            broadcast("new_event", {
+              session_id: sessionId,
+              agent_id: mainAgentId,
+              event_type: "TurnDuration",
+              tool_name: null,
+              summary,
+              created_at: turn.timestamp,
+            });
+          }
+        }
+      }
+
+      // Update session metadata with enriched data (thinking blocks, usage extras)
+      if (
+        result.usageExtras ||
+        result.thinkingBlockCount > 0 ||
+        reconciledTurnTotals ||
+        insertedTurns > 0
+      ) {
+        const session = stmts.getSession.get(sessionId);
+        if (session) {
+          const meta = session.metadata ? JSON.parse(session.metadata) : {};
+          if (result.usageExtras) {
+            meta.usage_extras = result.usageExtras;
+          }
+          if (result.thinkingBlockCount > 0) {
+            // The cache reports the transcript-wide total, not a per-hook delta.
+            meta.thinking_blocks = result.thinkingBlockCount;
+          }
+          // Count only the turns this fire actually inserted. Adding
+          // result.turnDurations.length re-counted the session's whole turn history on
+          // every hook fire, inflating turn_count and total_turn_duration_ms in step
+          // with the duplicate rows above.
+          if (reconciledTurnTotals) {
+            meta.turn_count = reconciledTurnTotals.count;
+            meta.total_turn_duration_ms = reconciledTurnTotals.durationMs;
+          } else if (insertedTurns > 0) {
+            meta.turn_count = (meta.turn_count || 0) + insertedTurns;
+            meta.total_turn_duration_ms = (meta.total_turn_duration_ms || 0) + insertedTurnMs;
+          }
+          stmts.updateSession.run(null, null, null, JSON.stringify(meta), sessionId);
+        }
+      }
+    }
+
+    // Subagent transcripts can contain the session's only usage records, so
+    // reconcile them even when the main transcript is empty or has no parsed
+    // messages yet.
+    const liveTokensByModel = combineLiveSessionTokens(
+      data.transcript_path,
+      result?.tokensByModel || null
+    );
+    if (liveTokensByModel) {
+      // Each bucket carries its pricing dimensions (model/speed/geo/tier) plus
+      // the 1h cache-write split and server-tool request counts.
+      for (const tokens of Object.values(liveTokensByModel)) {
+        stmts.replaceTokenUsage.run(
+          sessionId,
+          tokens.model,
+          tokens.speed,
+          tokens.geo,
+          tokens.tier,
+          tokens.input,
+          tokens.output,
+          tokens.cacheRead,
+          tokens.cacheWrite,
+          tokens.cacheWrite1h,
+          tokens.webSearch,
+          tokens.webFetch,
+          tokens.codeExec
+        );
+      }
+    }
+  }
+
+  // Evict transcript from cache on SessionEnd — session is done, no more reads expected.
+  // Must happen after token extraction above to avoid re-populating the cache.
+  if (hookType === "SessionEnd" && data.transcript_path) {
+    transcriptCache.invalidate(data.transcript_path);
+  }
+
+  // A transcript-sync pass exists for the derived data written above (tokens, compactions, turn
+  // timings, titles); recording it as an event would add a feed row per push. Derived metadata
+  // writers normally bump updated_at, so restore the pre-sync value to keep inactivity semantics.
+  if (hookType === "RemoteSync") {
+    const restored = stmts.restoreSessionUpdatedAt.run(
+      session.updated_at,
+      sessionId,
+      session.updated_at
+    );
+    if (restored.changes > 0) broadcast("session_updated", stmts.getSession.get(sessionId));
+    return {
+      session_id: sessionId,
+      agent_id: agentId,
+      event_type: eventType,
+      tool_name: null,
+      summary: null,
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  // Bump session updated_at on every real hook event.
+  stmts.touchSession.run(sessionId);
+
+  stmts.insertEvent.run(
+    sessionId,
+    agentId,
+    eventType,
+    toolName,
+    summary,
+    JSON.stringify(data)
+    // created_at uses default
+  );
+
+  const event = {
+    session_id: sessionId,
+    agent_id: agentId,
+    event_type: eventType,
+    tool_name: toolName,
+    summary,
+    created_at: new Date().toISOString(),
+  };
+  broadcast("new_event", event);
+  return event;
+});
+
+function codexHookSessionId(data) {
+  try {
+    return require("../lib/codex-ingest").codexHookSessionId(data);
+  } catch {
+    return null;
+  }
+}
+
+function codexTranscriptPath(data) {
+  const candidates = [
+    data?.transcript_path,
+    data?.transcriptPath,
+    data?.session?.transcript_path,
+    data?.context?.transcript_path,
+  ];
+  const supplied = candidates.find((candidate) => typeof candidate === "string");
+  if (supplied) return supplied;
+
+  // Codex hook payloads are version-dependent: many include a session/thread
+  // id but omit the rollout path. Resolve that id through the same guarded
+  // discovery index as the background synchronizer so a fresh turn is ingested
+  // immediately instead of waiting for its next polling pass.
+  const sessionId = codexHookSessionId(data);
+  if (!sessionId) return null;
+  try {
+    return require("../lib/codex-ingest").findCodexTranscriptForSession(sessionId);
+  } catch {
+    return null;
+  }
+}
+
+// Codex hooks intentionally acknowledge before parsing. The companion handler
+// is fail-safe and exits as soon as bytes are on the wire; a long historical
+// rollout must never make Codex wait. The append-only ingestor deduplicates a
+// simultaneous watcher notification by byte cursor and broadcasts the same
+// frames as Claude hooks once processing completes.
+router.post("/codex", (req, res) => {
+  const hookType = req.body?.hook_type || req.body?.event_type || "unknown";
+  const data = req.body?.data || req.body || {};
+  const transcriptPath = codexTranscriptPath(data);
+  // A rollout is NOT required to identify a Codex session — every lifecycle
+  // hook carries the thread id, and `codex exec --ephemeral` deliberately runs
+  // without persisting session files at all. Requiring a transcript here meant
+  // an ephemeral run's UserPromptSubmit/Stop/SessionEnd were all discarded and
+  // its card sat at Waiting forever. Only a payload that identifies nothing at
+  // all is unusable.
+  if (!transcriptPath && !codexHookSessionId(data)) {
+    return res
+      .status(202)
+      .json({ ok: true, queued: false, reason: "No transcript path or session id supplied" });
+  }
+  res.status(202).json({ ok: true, queued: true });
+  setImmediate(() => {
+    try {
+      const { ingestCodexHook } = require("../lib/codex-ingest");
+      const result = ingestCodexHook(transcriptPath, hookType, data);
+      if (!result?.changed || !result.session) return;
+      broadcast(result.created ? "session_created" : "session_updated", result.session);
+      if (result.agent) broadcast(result.created ? "agent_created" : "agent_updated", result.agent);
+      for (const event of result.events || []) broadcast("new_event", event);
+    } catch {
+      // Hook ingestion is intentionally fail-safe: polling remains the fallback.
+    }
+  });
+});
+
+router.post("/event", (req, res) => {
+  const { hook_type, data } = req.body;
+  if (!hook_type || !data) {
+    return res.status(400).json({
+      error: { code: "INVALID_INPUT", message: "hook_type and data are required" },
+    });
+  }
+
+  // Optional remote-origin proof. A hook forwarded from another machine may
+  // present REMOTE_PUSH_TOKEN (Bearer / X-Dashboard-Token, header only); a
+  // matching token only changes who OWNS a newly created session (see
+  // ensureSession). Anything else -- no token, a wrong token, or a
+  // DASHBOARD_HOOK_TOKEN in the same header -- keeps today's local behaviour,
+  // so this never rejects a hook that is accepted now.
+  const expectedRemoteToken = getRemotePushToken();
+  const remotePush =
+    !!expectedRemoteToken && tokensMatch(extractHeaderOnlyToken(req), expectedRemoteToken);
+  const result = processEvent(hook_type, data, remotePush ? { remotePush: true } : null);
+  if (!result) {
+    return res.status(400).json({
+      error: { code: "MISSING_SESSION", message: "session_id is required in data" },
+    });
+  }
+
+  res.json({ ok: true, event: result });
+
+  // Evaluate event-driven alert rules after the ingest transaction committed
+  // and the response is on its way — alerting must never slow down or fail
+  // hook ingestion (evaluateEvent itself is also internally fail-safe).
+  try {
+    evaluateEvent(result);
+  } catch {
+    /* non-fatal */
+  }
+
+  // Cursor's compatible hooks provide real-time lifecycle/tool events, while
+  // its native meta.json + prompt_history.json carry the title, cwd, turn
+  // history, and card context that the hook envelope omits. Enrich and snapshot
+  // off the response path so Cursor never waits on local history I/O.
+  if (data.session_id && isCursorTranscriptPath(data.transcript_path)) {
+    setImmediate(() => {
+      try {
+        const { enrichCursorSession } = require("../lib/cursor-ingest");
+        const enriched = enrichCursorSession(dbModule, data.transcript_path, {
+          sessionId: data.session_id,
+          model: data.model,
+        });
+        if (!enriched.changed || !enriched.session) return;
+        broadcast("session_updated", enriched.session);
+        for (const agent of stmts.listAgentsBySession.all(data.session_id)) {
+          broadcast("agent_updated", agent);
+        }
+      } catch {
+        // Fail-safe by design: the continuous Cursor sync retries later.
+      }
+    });
+  }
+
+  // After SubagentStop, scan the session's subagent JSONL files and ingest any
+  // tool calls that aren't yet in the events table. Subagent tool_use blocks
+  // never fire hooks on the parent session — this scan is the only path that
+  // attributes them to the subagent's agent_id.
+  if (hook_type === "SubagentStop" && data.session_id && data.transcript_path) {
+    // Models the live combined-transcript writer owns. The subagent scan must
+    // SKIP these buckets — the writer above already includes flat subagents,
+    // and writing one from two sources of different magnitude would trip
+    // replaceTokenUsage's
+    // compaction baseline-shift and inflate the total. We pass ALL of them
+    // (covers a mid-session /model switch, not just the latest). extract() is
+    // stat-cached, so this re-read is a cache hit. The scan falls back to the
+    // stored session.model if this list is empty.
+    let parentTokenModels = [];
+    try {
+      const mainResult = transcriptCache.extract(data.transcript_path);
+      const liveTokensByModel = combineLiveSessionTokens(
+        data.transcript_path,
+        mainResult?.tokensByModel || null
+      );
+      if (liveTokensByModel) {
+        parentTokenModels = Object.values(liveTokensByModel)
+          .map((b) => b.model)
+          .filter(Boolean);
+      }
+      if (mainResult?.latestModel) parentTokenModels.push(mainResult.latestModel);
+    } catch {
+      /* fall back to stored session.model inside the scan */
+    }
+    scanAndImportSubagents(dbModule, data.session_id, data.transcript_path, {
+      parentModels: parentTokenModels,
+    })
+      .then(({ created, reparented }) => {
+        if (created > 0 || reparented > 0) {
+          // Nudge SessionDetail to refetch — the page already debounces
+          // bursts of new_event into a single paginated reload. A pure
+          // re-parent (created === 0) still changes the tree shape, so it
+          // must trigger a refetch too.
+          broadcast("new_event", {
+            session_id: data.session_id,
+            agent_id: null,
+            event_type: "SubagentJsonlImported",
+            tool_name: null,
+            summary:
+              created > 0 && reparented > 0
+                ? `Imported ${created} subagent record(s) and re-parented ${reparented} nested subagent(s)`
+                : created > 0
+                  ? `Imported ${created} subagent record(s) from JSONL`
+                  : `Re-parented ${reparented} nested subagent(s)`,
+            created_at: new Date().toISOString(),
+          });
+        }
+      })
+      .catch(() => {
+        // non-fatal — partial JSONL during a live run is expected
+      });
+  }
+
+  // Ingest Workflow-tool run journals from disk. Inner agent() calls emit NO
+  // hooks, so the journal (written at workflow completion) is the only source.
+  // Run on the lifecycle hooks that bracket a workflow finishing, off the
+  // response path and fail-safe — a partial/absent journal is expected.
+  if (
+    ["Stop", "SubagentStop", "SessionEnd"].includes(hook_type) &&
+    data.session_id &&
+    data.transcript_path
+  ) {
+    ingestWorkflowsForSession(dbModule, {
+      id: data.session_id,
+      transcript_path: data.transcript_path,
+    })
+      .then((changed) => {
+        if (!changed || changed.length === 0) return;
+        for (const wf of changed) broadcast("workflow_upserted", wf);
+        // Workflow ingest folds inner-agent tokens into the session cost — nudge
+        // the session views to refetch.
+        const sess = stmts.getSession.get(data.session_id);
+        if (sess) broadcast("session_updated", sess);
+      })
+      .catch(() => {
+        // non-fatal — partial workflow artifacts during a live run are expected
+      });
+  }
+});
+
+// ── Watchdog: detect API errors in active sessions ─────────────────────────
+// Claude CLI doesn't fire a hook after API errors (401, rate limit, etc.) —
+// the session just sits there with the error in the transcript but no Stop
+// or Notification event. This watchdog re-reads transcripts for active
+// sessions every 15s to detect errors that hooks missed.
+const WATCHDOG_INTERVAL_MS = 15_000;
+const STALE_THRESHOLD_MS = 10_000; // only check sessions idle for >10s
+
+// Idle-working timeout for the no-marker interrupt case (Esc pressed before the
+// model emits anything → Claude Code writes no interrupt entry and fires no
+// hook). When the main agent has been "working" with no tool in flight and
+// NEITHER a hook event NOR the transcript has advanced for this long, we treat
+// the turn as dead and move the session to waiting-for-input. A genuinely busy
+// turn keeps one of those moving (PreToolUse/PostToolUse hooks, or streamed
+// output growing the transcript) so it is exempt; a rare false positive
+// self-heals on the next real hook. Configurable via DASHBOARD_WORKING_IDLE_SECONDS.
+const WORKING_IDLE_MS = (() => {
+  const raw = parseInt(process.env.DASHBOARD_WORKING_IDLE_SECONDS, 10);
+  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 120_000; // default 2 min
+})();
+
+// Idle gate for the liveness reap below. A session is only completed by the
+// process probe when BOTH its last hook write (updated_at) and its transcript
+// mtime are at least this old, so a session mid-spawn, mid-turn, or freshly
+// imported never flickers out on a transient probe miss (e.g. `claude
+// --resume` run from a different directory than the recorded session cwd — a
+// mismatch that self-heals via hook reactivation on the next prompt).
+// Configurable via DASHBOARD_LIVENESS_IDLE_SECONDS; default 60 s.
+const LIVENESS_IDLE_MS = (() => {
+  const raw = parseInt(process.env.DASHBOARD_LIVENESS_IDLE_SECONDS, 10);
+  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 60_000;
+})();
+
+// True when the transcript's latest API error is unrecovered — i.e. it sits at
+// the tail with no successful turn after it. Claude auto-retries transient API
+// errors (e.g. "Connection closed mid-response") and keeps going, so an error
+// followed by real turn activity has RECOVERED and must not pin the session in
+// `error` forever. Mirrors computePendingInterrupt's ordering logic using the
+// timestamps the transcript cache already exposes (errors[].timestamp vs
+// lastTurnTs), so it needs no transcript re-parse.
+function isErrorAtTail(result) {
+  if (!result || !Array.isArray(result.errors) || result.errors.length === 0) return false;
+  let lastErrorTs = null;
+  for (const e of result.errors) {
+    if (e && e.timestamp && (!lastErrorTs || e.timestamp > lastErrorTs)) lastErrorTs = e.timestamp;
+  }
+  if (!lastErrorTs) return false; // errors without timestamps — can't prove it's current
+  if (!result.lastTurnTs) return true; // an error but no turn activity ⇒ unrecovered
+  return lastErrorTs >= result.lastTurnTs; // error is the latest activity ⇒ unrecovered
+}
+
+function watchdogCheck() {
+  try {
+    const os = require("os");
+    const path = require("path");
+    const fs = require("fs");
+    const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS).toISOString();
+    // Find active sessions whose last event is older than threshold.
+    // Remote-source sessions (source != 'local') are excluded: their transcript
+    // is a delayed rsync mirror on this host and their activity clock is the
+    // remote machine's, so the transcript-tail error/interrupt heuristics below
+    // would misfire. Their lifecycle is owned by server/lib/remote-sync.js.
+    const staleSessions = db
+      .prepare(
+        `SELECT s.id, s.status, s.cwd,
+                (SELECT MAX(e.created_at) FROM events e WHERE e.session_id = s.id) as last_event,
+                (SELECT e.data FROM events e WHERE e.session_id = s.id
+                 AND e.event_type IN ('SessionStart','UserPromptSubmit','PreToolUse','Stop','Notification')
+                 ORDER BY e.created_at DESC LIMIT 1) as last_data
+         FROM sessions s
+         WHERE s.status IN ('active', 'error') AND s.updated_at < ?
+           AND (s.source = 'local' OR s.source IS NULL)`
+      )
+      .all(cutoff);
+
+    for (const sess of staleSessions) {
+      // Try to get transcript_path from event data first
+      let tPath = null;
+      if (sess.last_data) {
+        try {
+          tPath = JSON.parse(sess.last_data).transcript_path;
+        } catch {}
+      }
+      // Fall back: derive from Claude's standard path layout
+      // Claude slugifies cwd by replacing / with - and keeping the leading -
+      if (!tPath && sess.cwd) {
+        const slug = sess.cwd.replace(/[\/\.]/g, "-");
+        const candidate = path.join(os.homedir(), ".claude", "projects", slug, `${sess.id}.jsonl`);
+        if (fs.existsSync(candidate)) tPath = candidate;
+      }
+      if (!tPath) continue;
+
+      // Use cache directly (stat-based detection handles staleness automatically).
+      // Don't invalidate — it defeats caching and forces full re-reads every 15s.
+      const result = transcriptCache.extract(tPath);
+      if (!result) continue;
+
+      // Pick up a /rename or fresh ai-title even when no hook fired for it —
+      // a session left idle right after /rename has no further events, so the
+      // watchdog is the path that surfaces the new name within ~15s. The
+      // first-user-prompt descriptor backfills remaining placeholders here for
+      // the same reason (idle sessions get no further hook events).
+      const fullSess = stmts.getSession.get(sess.id);
+      if (fullSess) {
+        syncSessionName(fullSess, result);
+        applyFirstUserDescriptor(sess.id, result);
+        syncCardPromptPreview(sess.id, result);
+      }
+
+      const mainAgent = db
+        .prepare("SELECT * FROM agents WHERE session_id = ? AND type = 'main' LIMIT 1")
+        .get(sess.id);
+      const mainAgentId = mainAgent?.id ?? null;
+
+      // Self-heal a stale error. The session was flipped to `error` by a
+      // transient API error, but the transcript has since progressed past it
+      // (successful turns after the last error) — so it recovered and must not
+      // show `error` forever. Recovery normally only happens on a live
+      // UserPromptSubmit/PreToolUse hook; a session monitored purely via the
+      // transcript sweep (imported, or whose recovering hooks never landed) had
+      // no path back. This is why the watchdog now scans `error` sessions too.
+      if (sess.status === "error" && !isErrorAtTail(result)) {
+        stmts.reactivateSession.run(sess.id);
+        broadcast("session_updated", stmts.getSession.get(sess.id));
+        if (mainAgent && mainAgent.status === "error") {
+          stmts.reactivateAgent.run(mainAgentId);
+          broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+        }
+        continue; // handled this tick; error is cleared
+      }
+
+      // User-interrupt (Esc) recovery. No hook fires when a turn is cancelled,
+      // so UserPromptSubmit's "working" promotion is never undone and the main
+      // agent is stuck working forever. `pendingInterrupt` is derived purely
+      // from transcript ordering (latest interrupt vs latest real turn
+      // activity, both on Claude Code's clock): true when the transcript tail
+      // is an unrecovered interrupt. We deliberately do NOT compare the
+      // interrupt time to the session's last hook event — those use different
+      // clocks, and for an Esc pressed BEFORE any output the UserPromptSubmit
+      // event is stamped AFTER the interrupt, which is exactly the case that
+      // left sessions stuck "working" forever. If the user resumes, a new
+      // prompt lands in the transcript and pendingInterrupt flips back to false
+      // (and the fresh hook keeps the session non-stale meanwhile). Land the
+      // session in the same waiting + awaiting-input state a normal Stop would.
+      if (
+        result.pendingInterrupt &&
+        mainAgent &&
+        mainAgent.status === "working" &&
+        !mainAgent.awaiting_input_since
+      ) {
+        recoverInterruptedSession(sess.id, fullSess, mainAgentId, "interrupted by user");
+        // Handled this tick. A genuine error (rare alongside an interrupt) is
+        // still caught on a later tick once the agent is no longer "working".
+        continue;
+      }
+
+      if (!result.errors || result.errors.length === 0) {
+        // No transcript errors. Fall back to the no-marker interrupt check:
+        // the "submit a prompt, then Esc before any output" case writes neither
+        // a hook nor a transcript marker, so the only evidence is silence. If
+        // the main agent is "working" with no tool in flight and neither a hook
+        // event nor the transcript has advanced for WORKING_IDLE_MS, treat the
+        // turn as dead and move the session to waiting-for-input. The mtime
+        // guard means a streaming/long-output turn (transcript still growing)
+        // is exempt; the current_tool guard exempts a long-running tool call.
+        if (
+          mainAgent &&
+          mainAgent.status === "working" &&
+          !mainAgent.current_tool &&
+          !mainAgent.awaiting_input_since
+        ) {
+          let mtimeMs = 0;
+          try {
+            mtimeMs = fs.statSync(tPath).mtimeMs;
+          } catch {
+            /* transcript vanished — fall through with mtimeMs = 0 */
+          }
+          const hookMs = Date.parse(sess.last_event) || 0;
+          const idleMs = Date.now() - Math.max(mtimeMs, hookMs);
+          if (idleMs > WORKING_IDLE_MS) {
+            recoverInterruptedSession(sess.id, fullSess, mainAgentId, "interrupted by user");
+          }
+        }
+        continue;
+      }
+
+      // Keep distinct error summaries, not raw error count. Claude can append
+      // the same terminal API failure many times while it retries (notably an
+      // expired OAuth session). Comparing that raw count to the deliberately
+      // de-duplicated event table caused this watchdog to rewrite and broadcast
+      // an already-errored session every 15 seconds. Besides notification
+      // spam, that made `updated_at` look like fresh user activity.
+      const knownSummaries = new Set(
+        db
+          .prepare(`SELECT summary FROM events WHERE session_id = ? AND event_type = 'APIError'`)
+          .all(sess.id)
+          .map((r) => r.summary)
+      );
+      let recordedNewError = false;
+
+      for (const apiErr of result.errors) {
+        const summary = `${apiErr.type}: ${apiErr.message}`;
+        if (knownSummaries.has(summary)) continue;
+        // Add immediately so duplicate entries in this single transcript read
+        // remain one durable APIError event as well.
+        knownSummaries.add(summary);
+        const createdAt = Date.parse(apiErr.timestamp || "")
+          ? new Date(apiErr.timestamp).toISOString()
+          : new Date().toISOString();
+        stmts.insertEventAt.run(
+          sess.id,
+          mainAgentId,
+          "APIError",
+          null,
+          summary,
+          JSON.stringify(apiErr),
+          createdAt
+        );
+        broadcast("new_event", {
+          session_id: sess.id,
+          agent_id: mainAgentId,
+          event_type: "APIError",
+          tool_name: null,
+          summary,
+          created_at: createdAt,
+        });
+        recordedNewError = true;
+      }
+
+      // Flip to error only when a NEW distinct error was persisted this tick
+      // AND it is still unrecovered at the transcript tail. An unchanged
+      // terminal error is already represented in the DB, so it must be a true
+      // no-op: no timestamp touch, no WebSocket frame, and no duplicate alert.
+      if (recordedNewError && isErrorAtTail(result)) {
+        const currentSession = stmts.getSession.get(sess.id);
+        if (currentSession && currentSession.status !== "error") {
+          stmts.updateSession.run(null, "error", null, null, sess.id);
+          broadcast("session_updated", stmts.getSession.get(sess.id));
+        }
+        if (mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error") {
+          stmts.updateAgent.run(null, "error", null, null, null, null, mainAgentId);
+          if (mainAgentId) {
+            stmts.clearAgentAwaitingInput.run(mainAgentId);
+            broadcast("agent_updated", stmts.getAgent.get(mainAgentId));
+          }
+        }
+      }
+    }
+
+    // ── Liveness reap: complete sessions whose provider CLI is gone ───────
+    // SessionEnd is the ONLY signal that a session closed, and the hook that
+    // carries it is fire-and-forget — if the dashboard was down when the user
+    // quit (Ctrl+C, terminal closed), the event is lost forever and the
+    // session sits in Waiting until the 3 h stale sweep. The probe supplies
+    // the missing ground truth: when no matching provider CLI process has the
+    // session's cwd as its working directory, the session cannot be alive.
+    //
+    // Guards, in order:
+    //   - probe must be trustworthy (`available` — false on Windows, in
+    //     containers, when ps/lsof fail, or when DASHBOARD_LIVENESS_PROBE=0
+    //     is set for remote-hook setups where local processes prove nothing);
+    //   - session must have a cwd to match on;
+    //   - BOTH the last hook write and the transcript mtime must be older
+    //     than LIVENESS_IDLE_MS, so mid-turn / just-imported / just-resumed
+    //     sessions never flicker out on a transient mismatch. A false
+    //     completion self-heals anyway: the next hook event reactivates the
+    //     session via the existing needsReactivation path.
+    livenessReap();
+    livenessReap({ provider: "codex" });
+  } catch (err) {
+    // Watchdog is best-effort — log but never crash the server
+    console.warn("[WATCHDOG] Error during check:", err?.message || err);
+  }
+}
+
+/**
+ * Complete every `active` provider session whose cwd has no matching live CLI
+ * process. Claude is the default for backward compatibility; Codex follows
+ * the same conservative process + idle-age guard.
+ *
+ * `ignoreIdleGate` (boot passes only): skip the idle-age check entirely. At
+ * boot the gate is pure harm — the user's most common flow is "quit the
+ * session, immediately start the dashboard", where the transcript is only
+ * seconds old and the gate forced a full LIVENESS_IDLE_MS wait even though
+ * the probe already proved the process is gone. There is nothing mid-flight
+ * at boot to protect: genuinely live sessions are spared by the probe
+ * itself, and the one theoretical loser — a cwd-mismatched live session
+ * mid-turn at the exact boot instant — self-heals on its next hook via the
+ * existing reactivation path. Watchdog ticks keep the gate, where it still
+ * guards long-running steady-state work against transient probe misses.
+ */
+function livenessReap({ ignoreIdleGate = false, provider = "claude" } = {}) {
+  const fs = require("fs");
+  const path = require("path");
+  const cli = provider === "codex" ? "codex" : "claude";
+
+  // `source = 'local'` guard: sessions pulled from a remote machine over SSH
+  // (Remote Data Sources — sessions.source = a remote source id) can NEVER be
+  // probed by this host's `ps`/`lsof`, and their cwd is legitimately POSIX-
+  // absolute (e.g. /home/ubuntu/matroid), so the posix-cwd guard below does not
+  // catch them. Their liveness is owned entirely by the sync/import path
+  // (server/lib/remote-sync.js reconciles their status from the mirrored
+  // transcript), so the local process probe must leave them alone.
+  const activeSessions = db
+    .prepare(
+      `SELECT id, name, cwd, transcript_path, updated_at FROM sessions
+       WHERE status = 'active'
+         AND (source = 'local' OR source IS NULL)
+         AND COALESCE(provider, 'claude') = ?
+         AND ((cwd IS NOT NULL AND cwd <> '') OR (? = 'codex' AND transcript_path IS NOT NULL))`
+    )
+    .all(provider, provider);
+  if (activeSessions.length === 0) return; // nothing to check — skip the ps/lsof cost
+
+  const probe = liveness.probeLiveCwds(cli);
+  const rolloutProbe = provider === "codex" ? liveness.probeLiveCodexRollouts() : null;
+  if (!probe.available && !rolloutProbe?.available) return;
+  const now = Date.now();
+  for (const sess of activeSessions) {
+    if (rolloutProbe?.available && sess.transcript_path) {
+      if (rolloutProbe.paths.has(path.resolve(sess.transcript_path))) continue;
+    } else {
+      if (!probe.available || !sess.cwd) continue;
+      // Household-hook-forwarded sessions report cwd in the ORIGIN machine's own
+      // path syntax (e.g. Windows `D:\Git\ai-deck`). This probe only ever
+      // discovers *local* claude processes' cwds via /proc or lsof on THIS host,
+      // so a non-POSIX-absolute cwd can never appear in probe.cwds — treating
+      // that mismatch as "process is dead" is a false positive for every remote
+      // session, not a real crash signal. This guard protects the common mixed
+      // deployment (this host has BOTH local sessions the probe should keep
+      // reaping, AND remote household-hook sessions it must leave alone)
+      // without sacrificing local crash detection via DASHBOARD_LIVENESS_PROBE=0.
+      // The probe only ever reports POSIX cwds (/proc + lsof, and it bails out
+      // entirely on win32), so "could this cwd be local?" is precisely "is it
+      // POSIX-absolute?" — a leading-"/" check. Use path.posix.isAbsolute()
+      // explicitly rather than the platform-sensitive path.isAbsolute(): in
+      // production this only runs on POSIX hosts so the two are identical, but
+      // the unit tests mock probeLiveCwds() to exercise this reaper on a Windows
+      // host too, where bare path.isAbsolute("D:\\Git\\ai-deck") would be true
+      // and wrongly reap a forwarded remote session. posix keeps it host-agnostic.
+      if (!path.posix.isAbsolute(sess.cwd)) continue;
+
+      let resolvedCwd;
+      try {
+        resolvedCwd = path.resolve(sess.cwd);
+      } catch {
+        continue;
+      }
+      if (probe.cwds.has(resolvedCwd)) continue;
+    }
+
+    // Idle gate (watchdog ticks only — boot passes skip it, see above): the
+    // transcript mtime is the ground truth for "when did this session last
+    // do anything" — Claude Code appends to it on every turn, and it stops
+    // moving the instant the process dies. updated_at is only a fallback for
+    // sessions with no transcript on disk: import/backfill passes bump
+    // updated_at at BOOT, so gating on it left a freshly imported dead
+    // session sitting in Waiting for a full extra LIVENESS_IDLE_MS after
+    // startup. Live sessions don't need updated_at here: an alive claude is
+    // protected by the probe itself, and a cwd-mismatched one that's
+    // actually mid-turn keeps its transcript mtime fresh.
+    if (!ignoreIdleGate) {
+      let lastActivityMs = 0;
+      if (sess.transcript_path) {
+        try {
+          lastActivityMs = fs.statSync(sess.transcript_path).mtimeMs;
+        } catch {
+          /* transcript gone — fall back to updated_at below */
+        }
+      }
+      if (!lastActivityMs) lastActivityMs = Date.parse(sess.updated_at) || 0;
+      if (now - lastActivityMs < LIVENESS_IDLE_MS) continue;
+    }
+
+    // Mirror the SessionEnd case: all DB writes first, then broadcasts.
+    const ts = new Date().toISOString();
+    clearAwaitingInput(sess.id, null, false);
+    const agents = stmts.listAgentsBySession.all(sess.id);
+    for (const agent of agents) {
+      if (agent.status !== "completed" && agent.status !== "error") {
+        stmts.updateAgent.run(null, "completed", null, null, ts, null, agent.id);
+      }
+    }
+    stmts.updateSession.run(null, "completed", ts, null, sess.id);
+
+    const label = sess.name || `Session ${sess.id.slice(0, 8)}`;
+    const summary = `Session closed: ${label} (no running ${cli} process)`;
+    const mainAgentId = provider === "codex" ? `codex:${sess.id}` : `${sess.id}-main`;
+    stmts.insertEvent.run(
+      sess.id,
+      stmts.getAgent.get(mainAgentId) ? mainAgentId : null,
+      "SessionEnd",
+      null,
+      summary,
+      JSON.stringify({ session_id: sess.id, provider, source: "liveness-probe" })
+    );
+
+    broadcast("session_updated", stmts.getSession.get(sess.id));
+    for (const agent of agents) {
+      if (agent.status !== "completed" && agent.status !== "error") {
+        broadcast("agent_updated", stmts.getAgent.get(agent.id));
+      }
+    }
+    broadcast("new_event", {
+      session_id: sess.id,
+      agent_id: stmts.getAgent.get(mainAgentId) ? mainAgentId : null,
+      event_type: "SessionEnd",
+      tool_name: null,
+      summary,
+      created_at: ts,
+    });
+    console.log(
+      `[WATCHDOG] Liveness reap: completed dead ${provider} session ${sess.id} (${label})`
+    );
+  }
+}
+
+// ── POST /api/hooks/ingest-batch ────────────────────────────────────────────
+// Third ingestion path (see server/lib/remote-sync.js for the other two: the
+// local hook POSTs above, and the SSH-pull path in remote-sync.js). This one
+// is for a roaming/NAT'd machine the dashboard can never reach to pull FROM —
+// it pushes a batch of its own session data to us instead, over HTTPS.
+//
+// Two things make this route different from every other route in this file:
+//   1. It is reachable from the public internet via Traefik, not loopback —
+//      so unlike the local hook routes above (which rely on hookGuard being a
+//      no-op + loopback bind), this route refuses to run at all unless its
+//      OWN REMOTE_PUSH_TOKEN is configured (503, not a silent accept), and
+//      every request must present it as a bearer/x-dashboard-token/?token=
+//      match (401 otherwise). Deliberately NOT DASHBOARD_HOOK_TOKEN: that
+//      token exists to harden the LOOPBACK-only local hook above, and an
+//      operator who sets it for that reason alone must not thereby also open
+//      an internet-writable session endpoint they never opted into (roaming
+//      laptop threat model — losing it shouldn't compromise everything under
+//      /api/hooks). See getRemotePushToken() in lib/security.js.
+//   2. A pushed session_id is caller-supplied and could collide (by accident
+//      or by a malicious remote) with a session this dashboard's OWN local
+//      hook is actively managing. Ownership is decided from the session
+//      row's stored `source` column — set once, authoritatively, by whichever
+//      path created the row first — and NEVER from anything in the request.
+
+// Sentinel `sessions.source` for rows created by this route. remote_sources
+// ids (server/routes/remote-sources.js) are always `src_` + 12 lowercase hex
+// characters (`src_${crypto.randomBytes(6).toString("hex")}`) — this sentinel
+// carries no `src_` prefix, so it can never collide with a real configured
+// SSH source id, now or in the future (the id format is fixed at creation).
+const REMOTE_PUSH_SOURCE = "remote_push";
+const setSessionProviderStmt = db.prepare("UPDATE sessions SET provider = ? WHERE id = ?");
+
+// Bump only on a real wire-format break. A mismatch is a whole-request 409 —
+// per-item soft-fail doesn't make sense when the client and server disagree
+// on the payload shape itself.
+const INGEST_BATCH_SCHEMA_VERSION = 1;
+
+// This route is externally reachable (public internet via Traefik). Without
+// a combined item cap, a valid token holder could submit one huge batch and
+// force O(items) synchronous SQLite work plus O(items × connected clients)
+// WebSocket fan-out in a single request. Reject outright, before any other
+// validation/DB work, rather than accepting and later choking on it.
+const MAX_INGEST_BATCH_ITEMS = 1000;
+
+const REMOTE_TOOL_EVENT_TYPE = "RemoteToolEvent";
+const REMOTE_TURN_EVENT_TYPE = "RemoteTurn";
+
+// Numeric fields on a tokens[] entry — see coerceNonNegativeInt.
+const TOKEN_NUMERIC_FIELDS = [
+  "input",
+  "output",
+  "cacheRead",
+  "cacheWrite",
+  "cacheWrite1h",
+  "webSearch",
+  "webFetch",
+  "codeExec",
+];
+
+// Mirrors the partial index idx_events_session_type_uuid (server/db.js): the
+// WHERE clause must repeat json_valid(data) = 1 AND the event_type IN (...)
+// list literally for SQLite to use the (now-narrowed) partial index -- a bare
+// `event_type = ?` parameter is not provably within the IN-list to the query
+// planner, so it falls back to a full events scan otherwise (checked against
+// EXPLAIN QUERY PLAN). The json_valid guard is also required for correctness
+// (json_extract throws on a non-JSON row) independent of the index. Keep this
+// IN list identical to the index's own predicate in server/db.js.
+const dedupEventStmt = db.prepare(
+  `SELECT 1 FROM events
+   WHERE session_id = ? AND event_type = ? AND json_valid(data) = 1
+     AND event_type IN ('${REMOTE_TOOL_EVENT_TYPE}', '${REMOTE_TURN_EVENT_TYPE}')
+     AND json_extract(data, '$.uuid') = ? LIMIT 1`
+);
+
+function itemError(item, code, message) {
+  return { item, code, message };
+}
+
+// Any non-empty string was accepted as a uuid before this (CodeRabbit review
+// on PR #329) -- e.g. "not-a-uuid" was persisted and reported as written,
+// even though the dedup contract (dedupEventStmt) is documented as keying on
+// a real uuid. Deliberately permissive on version/variant nibbles (accepts
+// any RFC 4122-shaped value, not just v4) -- this is an identifier/dedup key
+// from a remote client, not a value this server generates itself.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
+/**
+ * Non-negative safe-integer coercion for a present-but-optional numeric
+ * field. Absent/null => 0 (mirrors the local hook's tokens.field || 0
+ * convention); present-but-invalid (negative, fractional, non-finite, wrong
+ * type) => rejected so the caller can build a per-item error.
+ */
+function coerceNonNegativeInt(value) {
+  if (value === undefined || value === null) return { ok: true, value: 0 };
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    // isSafeInteger, not isInteger: a value beyond +/-2^53 can still pass
+    // isInteger after JSON parsing rounds it to the nearest representable
+    // double, silently corrupting the token/duration count it's supposed to
+    // validate.
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    return { ok: false };
+  }
+  return { ok: true, value };
+}
+
+/** Absent timestamp is fine (caller falls back to server "now"); present-but-
+ * unparseable is rejected. Returns a normalized (millisecond-precision) ISO
+ * string so the value written to created_at and the value broadcast over the
+ * WebSocket are byte-identical. */
+function coerceTimestamp(value) {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== "string") return { ok: false };
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return { ok: false };
+  return { ok: true, value: new Date(ms).toISOString() };
+}
+
+router.post("/ingest-batch", (req, res) => {
+  // Own gate, independent of hookGuard (server/index.js) and its
+  // DASHBOARD_HOOK_TOKEN: hookGuard no-ops when that token is unset (fine for
+  // the loopback-only local hook above, wrong for a route reachable from the
+  // public internet), and even when it IS set, reusing it here would silently
+  // widen what that token protects beyond what an operator configuring it for
+  // the local hook opted into. An unconfigured REMOTE_PUSH_TOKEN must refuse
+  // outright rather than silently accept unauthenticated writes.
+  const expectedToken = getRemotePushToken();
+  if (!expectedToken) {
+    return res.status(503).json({
+      error: {
+        code: "REMOTE_PUSH_NOT_CONFIGURED",
+        message: "remote push ingestion is not enabled",
+      },
+    });
+  }
+  // Header-only extraction (never req.query.token) -- this route is public-
+  // internet-reachable, and a query-string credential ends up in server/proxy
+  // access logs (CodeRabbit review).
+  if (!tokensMatch(extractHeaderOnlyToken(req), expectedToken)) {
+    return res.status(401).json({
+      error: { code: "EUNAUTHORIZED", message: "missing or invalid remote-push token" },
+    });
+  }
+
+  const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+
+  if (body.schema_version !== undefined && body.schema_version !== INGEST_BATCH_SCHEMA_VERSION) {
+    return res.status(409).json({
+      error: {
+        code: "SCHEMA_VERSION_MISMATCH",
+        message: `this server speaks schema_version ${INGEST_BATCH_SCHEMA_VERSION}, request carried ${body.schema_version}`,
+      },
+    });
+  }
+
+  const sessionId = typeof body.session_id === "string" ? body.session_id.trim() : "";
+  if (!sessionId) {
+    return res
+      .status(400)
+      .json({ error: { code: "INVALID_INPUT", message: "session_id is required" } });
+  }
+
+  try {
+    assertProvider(body.provider);
+  } catch {
+    return res.status(400).json({
+      error: {
+        code: "INVALID_PROVIDER",
+        message: `provider must be one of: ${REMOTE_PROVIDERS.join(", ")}`,
+      },
+    });
+  }
+  const provider = body.provider;
+
+  const tokens = Array.isArray(body.tokens) ? body.tokens : [];
+  const toolEvents = Array.isArray(body.tool_events) ? body.tool_events : [];
+  const turns = Array.isArray(body.turns) ? body.turns : [];
+
+  if (tokens.length + toolEvents.length + turns.length > MAX_INGEST_BATCH_ITEMS) {
+    return res.status(413).json({
+      error: { code: "BATCH_TOO_LARGE", message: `batch exceeds ${MAX_INGEST_BATCH_ITEMS} items` },
+    });
+  }
+
+  const mainAgentId = `${sessionId}-main`;
+  const existing = stmts.getSession.get(sessionId);
+
+  // ── Ownership gate ─────────────────────────────────────────────────────
+  // A session already owned by anything OTHER than this route's own sentinel
+  // (source='local', or a real remote_sources id from the SSH-pull path) can
+  // NEVER be written to from here — a remote caller must not be able to
+  // hijack a locally-managed session by guessing/reusing its id. Every item
+  // in the batch targets this one session_id (see payload shape), so the
+  // per-item-not-per-request soft-fail contract collapses to "reject every
+  // item" here, but is expressed per item so the response shape stays
+  // uniform with every other rejection reason.
+  if (existing && existing.source !== REMOTE_PUSH_SOURCE) {
+    const errors = [];
+    tokens.forEach((_t, i) =>
+      errors.push(
+        itemError(
+          `tokens[${i}]`,
+          "SESSION_LOCALLY_OWNED",
+          `session ${sessionId} is not remote-push owned`
+        )
+      )
+    );
+    toolEvents.forEach((_e, i) =>
+      errors.push(
+        itemError(
+          `tool_events[${i}]`,
+          "SESSION_LOCALLY_OWNED",
+          `session ${sessionId} is not remote-push owned`
+        )
+      )
+    );
+    turns.forEach((_t, i) =>
+      errors.push(
+        itemError(
+          `turns[${i}]`,
+          "SESSION_LOCALLY_OWNED",
+          `session ${sessionId} is not remote-push owned`
+        )
+      )
+    );
+    return res.json({ ok: true, written: 0, skipped: 0, errors });
+  }
+
+  // ── Validation (no DB writes yet) ────────────────────────────────────────
+  const errors = [];
+  let skipped = 0;
+  const validTokens = [];
+  const validToolEvents = [];
+  const validTurns = [];
+  // In-request dedup: the DB-backed dedup check below only sees rows already
+  // committed from a PRIOR request. Two items with the same (event_type,
+  // uuid) inside THIS SAME batch would both pass that check and both insert,
+  // so track what this batch has already accepted for insertion too.
+  const seenInBatch = new Set();
+
+  /**
+   * Resolve agent_id (or the session's main agent when absent). The main
+   * agent is intentionally accepted without a DB lookup here: for a brand
+   * new session it doesn't exist yet (created inside the write transaction
+   * below), and for an existing session whose main-agent row was somehow
+   * lost, the write transaction ensures it exists before any event
+   * referencing it is inserted — either way agent_id === mainAgentId is
+   * always safe to accept at validation time.
+   */
+  function resolveAgentId(rawAgentId, label) {
+    if (rawAgentId === undefined || rawAgentId === null || rawAgentId === "") {
+      return { ok: true, agentId: mainAgentId };
+    }
+    if (typeof rawAgentId !== "string") {
+      errors.push(itemError(label, "INVALID_AGENT_ID", "agent_id must be a string"));
+      return { ok: false };
+    }
+    if (rawAgentId === mainAgentId) {
+      return { ok: true, agentId: mainAgentId };
+    }
+    const agent = stmts.getAgent.get(rawAgentId);
+    if (!agent || agent.session_id !== sessionId) {
+      errors.push(
+        itemError(label, "UNKNOWN_AGENT", `agent_id does not belong to session ${sessionId}`)
+      );
+      return { ok: false };
+    }
+    return { ok: true, agentId: rawAgentId };
+  }
+
+  tokens.forEach((t, i) => {
+    const label = `tokens[${i}]`;
+    if (!t || typeof t !== "object" || typeof t.model !== "string" || !t.model) {
+      errors.push(itemError(label, "INVALID_INPUT", "model is required"));
+      return;
+    }
+    const values = {};
+    let invalidField = null;
+    for (const key of TOKEN_NUMERIC_FIELDS) {
+      const r = coerceNonNegativeInt(t[key]);
+      if (!r.ok) {
+        invalidField = key;
+        break;
+      }
+      values[key] = r.value;
+    }
+    if (invalidField) {
+      errors.push(
+        itemError(label, "INVALID_NUMERIC", `${invalidField} must be a non-negative integer`)
+      );
+      return;
+    }
+    if (values.cacheWrite1h > values.cacheWrite) {
+      errors.push(
+        itemError(label, "CACHE_WRITE_1H_EXCEEDS_TOTAL", "cacheWrite1h must be <= cacheWrite")
+      );
+      return;
+    }
+    validTokens.push({
+      model: t.model,
+      // Bucket-pricing dimensions: pass through the same normalizers the
+      // local transcript-derived path uses (server/lib/token-usage.js) —
+      // never store a raw client-supplied value. Note this route mirrors the
+      // local hook's cumulative-per-bucket-totals contract: each tokens[]
+      // entry is the bucket's FULL current total (like a transcript re-parse),
+      // not a delta — replaceTokenUsage below is a high-water-mark REPLACE,
+      // not an additive upsert, so a client sending deltas would silently
+      // under-count.
+      speed: normalizeSpeed({ speed: t.speed }),
+      geo: normalizeGeo({ inference_geo: t.inference_geo }),
+      tier: normalizeTier({ service_tier: t.service_tier }),
+      ...values,
+    });
+  });
+
+  toolEvents.forEach((ev, i) => {
+    const label = `tool_events[${i}]`;
+    if (!ev || typeof ev !== "object" || typeof ev.uuid !== "string" || !ev.uuid) {
+      errors.push(itemError(label, "INVALID_INPUT", "uuid is required"));
+      return;
+    }
+    if (!isUuid(ev.uuid)) {
+      errors.push(itemError(label, "INVALID_UUID", "uuid must be a valid UUID"));
+      return;
+    }
+    const agentRes = resolveAgentId(ev.agent_id, label);
+    if (!agentRes.ok) return;
+    const tsRes = coerceTimestamp(ev.timestamp);
+    if (!tsRes.ok) {
+      errors.push(
+        itemError(label, "INVALID_TIMESTAMP", "timestamp must be a valid ISO date string")
+      );
+      return;
+    }
+    const dedupKey = `${REMOTE_TOOL_EVENT_TYPE} ${ev.uuid}`;
+    if (
+      seenInBatch.has(dedupKey) ||
+      dedupEventStmt.get(sessionId, REMOTE_TOOL_EVENT_TYPE, ev.uuid)
+    ) {
+      skipped++;
+      return;
+    }
+    seenInBatch.add(dedupKey);
+    validToolEvents.push({
+      uuid: ev.uuid,
+      agentId: agentRes.agentId,
+      toolName: typeof ev.tool_name === "string" && ev.tool_name ? ev.tool_name : null,
+      status: typeof ev.status === "string" && ev.status ? ev.status : null,
+      timestamp: tsRes.value,
+    });
+  });
+
+  turns.forEach((t, i) => {
+    const label = `turns[${i}]`;
+    if (!t || typeof t !== "object" || typeof t.uuid !== "string" || !t.uuid) {
+      errors.push(itemError(label, "INVALID_INPUT", "uuid is required"));
+      return;
+    }
+    if (!isUuid(t.uuid)) {
+      errors.push(itemError(label, "INVALID_UUID", "uuid must be a valid UUID"));
+      return;
+    }
+    const agentRes = resolveAgentId(t.agent_id, label);
+    if (!agentRes.ok) return;
+    const durRes = coerceNonNegativeInt(t.duration_ms);
+    if (!durRes.ok) {
+      errors.push(
+        itemError(label, "INVALID_NUMERIC", "duration_ms must be a non-negative integer")
+      );
+      return;
+    }
+    const tsRes = coerceTimestamp(t.timestamp);
+    if (!tsRes.ok) {
+      errors.push(
+        itemError(label, "INVALID_TIMESTAMP", "timestamp must be a valid ISO date string")
+      );
+      return;
+    }
+    const dedupKey = `${REMOTE_TURN_EVENT_TYPE} ${t.uuid}`;
+    if (
+      seenInBatch.has(dedupKey) ||
+      dedupEventStmt.get(sessionId, REMOTE_TURN_EVENT_TYPE, t.uuid)
+    ) {
+      skipped++;
+      return;
+    }
+    seenInBatch.add(dedupKey);
+    validTurns.push({
+      uuid: t.uuid,
+      agentId: agentRes.agentId,
+      durationMs: durRes.value,
+      timestamp: tsRes.value,
+    });
+  });
+
+  // ── Write phase: valid items only, one transaction for atomicity ────────
+  // Broadcasts are collected here and flushed only AFTER writeBatch() returns
+  // successfully (see the file's own "do all DB writes BEFORE any broadcast"
+  // rule above) -- emitting them from inside the transaction would let a
+  // later statement's throw roll back every insert while clients had already
+  // been told about a session/event that turns out not to exist (e.g. a
+  // concurrent delete of a resolved agent_id row between validation and the
+  // write causes insertEventAt to fail its FOREIGN KEY and abort the batch).
+  const pendingBroadcasts = [];
+  const writeBatch = db.transaction(() => {
+    let session = existing;
+    const repoRemoteUrl = sanitizeRepoRemoteUrl(body.repo_remote_url);
+    if (!session) {
+      const sessionName =
+        typeof body.session_name === "string" && body.session_name
+          ? body.session_name
+          : `Session ${sessionId.slice(0, 8)}`;
+      db.prepare(
+        `INSERT INTO sessions (id, name, status, cwd, model, provider, source, started_at, updated_at)
+         VALUES (?, ?, 'active', ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
+      ).run(
+        sessionId,
+        sessionName,
+        typeof body.cwd === "string" && body.cwd ? body.cwd : null,
+        typeof body.model === "string" && body.model ? body.model : null,
+        provider,
+        REMOTE_PUSH_SOURCE
+      );
+      session = stmts.getSession.get(sessionId);
+    }
+
+    // Remote-push authentication establishes the collector identity. Preserve
+    // only its first non-empty repository URL so retries and later batches
+    // cannot rewrite a session's cross-machine mapping.
+    if (repoRemoteUrl) {
+      stmts.setSessionRepoRemoteUrl.run(repoRemoteUrl, sessionId);
+      session = stmts.getSession.get(sessionId);
+    }
+    if (!existing) {
+      // Queue only the fully persisted row: flushing happens after this
+      // transaction commits, so WebSocket and REST clients see one contract.
+      pendingBroadcasts.push(["session_created", session]);
+    }
+
+    // Ensure the main agent row exists before any event below references it —
+    // covers both "brand new session" and the rarer "existing remote_push
+    // session whose main-agent row was lost" case. events.agent_id is a
+    // FOREIGN KEY; inserting against a missing agent throws and would roll
+    // back every valid item in this batch (see codex-ingest.js's identical
+    // guard + server/__tests__/codex-ingest.test.js "still records the turn
+    // when the main agent row is missing").
+    if (!stmts.getAgent.get(mainAgentId)) {
+      stmts.insertAgent.run(
+        mainAgentId,
+        sessionId,
+        `Main Agent - ${session.name || `Session ${sessionId.slice(0, 8)}`}`,
+        "main",
+        null,
+        "working",
+        null,
+        null,
+        null
+      );
+      const mainAgent = stmts.getAgent.get(mainAgentId);
+      if (mainAgent) pendingBroadcasts.push(["agent_created", mainAgent]);
+    }
+
+    for (const tk of validTokens) {
+      stmts.replaceTokenUsage.run(
+        sessionId,
+        tk.model,
+        tk.speed,
+        tk.geo,
+        tk.tier,
+        tk.input,
+        tk.output,
+        tk.cacheRead,
+        tk.cacheWrite,
+        tk.cacheWrite1h,
+        tk.webSearch,
+        tk.webFetch,
+        tk.codeExec
+      );
+    }
+
+    for (const ev of validToolEvents) {
+      const ts = ev.timestamp || new Date().toISOString();
+      const summary = ev.toolName ? `Called ${ev.toolName}` : "Remote tool event";
+      stmts.insertEventAt.run(
+        sessionId,
+        ev.agentId,
+        REMOTE_TOOL_EVENT_TYPE,
+        ev.toolName,
+        summary,
+        JSON.stringify({ uuid: ev.uuid, status: ev.status }),
+        ts
+      );
+      pendingBroadcasts.push([
+        "new_event",
+        {
+          session_id: sessionId,
+          agent_id: ev.agentId,
+          event_type: REMOTE_TOOL_EVENT_TYPE,
+          tool_name: ev.toolName,
+          summary,
+          created_at: ts,
+        },
+      ]);
+    }
+
+    for (const t of validTurns) {
+      const ts = t.timestamp || new Date().toISOString();
+      const summary = "Remote turn";
+      stmts.insertEventAt.run(
+        sessionId,
+        t.agentId,
+        REMOTE_TURN_EVENT_TYPE,
+        null,
+        summary,
+        JSON.stringify({ uuid: t.uuid, duration_ms: t.durationMs }),
+        ts
+      );
+      pendingBroadcasts.push([
+        "new_event",
+        {
+          session_id: sessionId,
+          agent_id: t.agentId,
+          event_type: REMOTE_TURN_EVENT_TYPE,
+          tool_name: null,
+          summary,
+          created_at: ts,
+        },
+      ]);
+    }
+  });
+
+  try {
+    writeBatch();
+  } catch (err) {
+    console.error(`[HOOKS] ingest-batch write failed for session ${sessionId}:`, err);
+    return res.status(500).json({
+      error: {
+        code: "WRITE_FAILED",
+        message: "batch write failed and was rolled back",
+      },
+    });
+  }
+
+  for (const [type, payload] of pendingBroadcasts) broadcast(type, payload);
+
+  res.json({
+    ok: true,
+    written: validTokens.length + validToolEvents.length + validTurns.length,
+    skipped,
+    errors,
+  });
+});
+
+const watchdogTimer = setInterval(watchdogCheck, WATCHDOG_INTERVAL_MS);
+// Don't keep the process alive just for the watchdog
+if (watchdogTimer.unref) watchdogTimer.unref();
+
+// ── POST /api/hooks/ingest-transcript ────────────────────────────────────────────────────────
+// Remote machines push their Claude Code transcripts (main + subagent JSONL) here, append-only.
+// Files land in this server's Claude projects dir in Claude Code's own layout (see
+// lib/remote-transcript.js), so tokens, compactions, API errors, turn timings, titles, the
+// transcript viewer and the subagent import all work on them exactly as for local sessions.
+// Auth is REMOTE_PUSH_TOKEN, identical to /ingest-batch.
+const REMOTE_TRANSCRIPT_MAX_FILE_BYTES = (() => {
+  const mb = parseInt(process.env.REMOTE_TRANSCRIPT_MAX_FILE_MB, 10);
+  return (Number.isFinite(mb) && mb > 0 ? mb : 256) * 1024 * 1024;
+})();
+
+/** Re-derive everything CCAM derives from a session's transcript files, then import subagents. */
+function syncRemoteTranscript(sessionId, mainAbs, meta) {
+  if (!fs.existsSync(mainAbs)) return;
+  const session = stmts.getSession.get(sessionId);
+  if (!session || session.source !== REMOTE_PUSH_SOURCE) return;
+  // A forwarded hook may have stored the origin machine's absolute path first. Once the validated
+  // upload exists locally, every transcript reader and background scanner must use this copy.
+  stmts.replaceSessionTranscriptPath.run(mainAbs, sessionId);
+  processEvent(
+    "RemoteSync",
+    {
+      session_id: sessionId,
+      transcript_path: mainAbs,
+      cwd: meta.cwd,
+      session_name: meta.sessionName,
+    },
+    { remotePush: true }
+  );
+
+  // Same sequence as the SubagentStop branch of POST /event: tell the subagent scan which models
+  // the live combined-transcript writer already owns so it does not double-write those buckets.
+  let parentModels = [];
+  try {
+    const mainResult = transcriptCache.extract(mainAbs);
+    const live = combineLiveSessionTokens(mainAbs, mainResult?.tokensByModel || null);
+    if (live)
+      parentModels = Object.values(live)
+        .map((b) => b.model)
+        .filter(Boolean);
+    if (mainResult?.latestModel) parentModels.push(mainResult.latestModel);
+  } catch {
+    /* the scan falls back to the stored session.model */
+  }
+  scanAndImportSubagents(dbModule, sessionId, mainAbs, { parentModels })
+    .then(({ created, reparented }) => {
+      if (created > 0 || reparented > 0) {
+        broadcast("new_event", {
+          session_id: sessionId,
+          agent_id: null,
+          event_type: "SubagentJsonlImported",
+          tool_name: null,
+          summary: `Imported ${created} subagent record(s), re-parented ${reparented}`,
+          created_at: new Date().toISOString(),
+        });
+      }
+    })
+    .catch(() => {
+      /* partial JSONL during a live run is expected */
+    });
+}
+
+router.post("/ingest-transcript", (req, res) => {
+  const expectedToken = getRemotePushToken();
+  if (!expectedToken) {
+    return res.status(503).json({
+      error: {
+        code: "REMOTE_PUSH_NOT_CONFIGURED",
+        message: "remote push ingestion is not enabled",
+      },
+    });
+  }
+  if (!tokensMatch(extractHeaderOnlyToken(req), expectedToken)) {
+    return res.status(401).json({
+      error: { code: "EUNAUTHORIZED", message: "missing or invalid remote-push token" },
+    });
+  }
+  const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const invalid = (message) => res.status(400).json({ error: { code: "INVALID_INPUT", message } });
+
+  if (body.provider !== undefined && body.provider !== "claude")
+    return invalid("provider must be claude");
+  const sessionId = typeof body.session_id === "string" ? body.session_id.trim() : "";
+  if (!isValidSessionId(sessionId)) return invalid("session_id is required");
+  if (typeof body.content_b64 !== "string") return invalid("content_b64 is required");
+
+  let resolved;
+  try {
+    resolved = resolveTranscriptPath(getProjectsDir(), sessionId, body.rel_path);
+  } catch (err) {
+    if (err instanceof TranscriptPathError) return invalid(err.message);
+    throw err;
+  }
+
+  // Same ownership rule as /ingest-batch: never write into a locally-managed session.
+  const existing = stmts.getSession.get(sessionId);
+  if (existing && existing.source !== REMOTE_PUSH_SOURCE) {
+    return res.status(409).json({
+      error: {
+        code: "SESSION_LOCALLY_OWNED",
+        message: `session ${sessionId} is not remote-push owned`,
+      },
+    });
+  }
+  // The session row must exist first (created by /ingest-batch as remote_push). Otherwise the
+  // server's own projects-dir sweep could find the file before any row exists and import it as a
+  // locally-owned session, which would lock this collector out of the session.
+  if (!existing) {
+    return res.status(409).json({
+      error: {
+        code: "SESSION_NOT_REGISTERED",
+        message: `register session ${sessionId} with /ingest-batch before uploading its transcript`,
+      },
+    });
+  }
+
+  const chunk = decodeBase64Strict(body.content_b64);
+  if (!chunk) return invalid("content_b64 is not valid base64");
+
+  let result;
+  try {
+    result = appendChunk(resolved.abs, body.offset, chunk, {
+      maxFileBytes: REMOTE_TRANSCRIPT_MAX_FILE_BYTES,
+      projectsDir: getProjectsDir(),
+    });
+  } catch (err) {
+    if (err instanceof TranscriptPathError) return invalid(err.message);
+    throw err;
+  }
+  if (!result.ok) {
+    return res
+      .status(result.status)
+      .json({ error: { code: result.code, message: result.code }, size: result.size });
+  }
+  res.json({ ok: true, size: result.size });
+
+  // Chunks are written with sync:false; the client sets sync:true once per session per pass, so a
+  // large backfill is parsed once instead of once per chunk.
+  if (body.sync === true) {
+    setImmediate(() => {
+      try {
+        syncRemoteTranscript(sessionId, resolved.mainAbs, {
+          cwd: typeof body.cwd === "string" && body.cwd ? body.cwd : undefined,
+          sessionName:
+            typeof body.session_name === "string" && body.session_name
+              ? body.session_name
+              : undefined,
+        });
+      } catch (err) {
+        console.error("[ingest-transcript] sync failed for", sessionId, err && err.message);
+      }
+    });
+  }
+});
+
+router.transcriptCache = transcriptCache;
+router.watchdogCheck = watchdogCheck;
+router.livenessReap = livenessReap;
+// Exposed as a narrow test seam for version-variant Codex hook payloads.
+router.codexTranscriptPath = codexTranscriptPath;
+module.exports = router;

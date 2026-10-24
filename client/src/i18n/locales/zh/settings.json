@@ -1,0 +1,637 @@
+{
+  "title": "设置",
+  "subtitle": "管理定价、通知、数据和钩子",
+  "exportData": "导出数据",
+  "acrossSessions": "跨所有追踪的会话",
+  "basedOnUsage": "基于每模型 Token 使用量",
+  "tabby": {
+    "title": "Tabby 伙伴",
+    "description": "一只浮动的猫，会对你的实时会话做出反应。",
+    "enable": "显示 Tabby",
+    "enableDesc": "在整个仪表板的角落显示伙伴（按 ⌘B 打开）"
+  },
+  "sound": {
+    "title": "声音",
+    "description": "为实时会话活动播放简短、轻柔的提示音。完全在浏览器中合成——无需下载，不做追踪。",
+    "enable": "启用声音提示",
+    "enableDesc": "会话开始、结束或出错时播放轻柔提示音",
+    "volume": "音量",
+    "playWhen": "在以下情况播放提示音…",
+    "newSession": "会话开始时",
+    "sessionComplete": "会话回复完成时",
+    "sessionError": "会话出错时",
+    "subagentSpawned": "子代理启动时",
+    "notification": "Claude Code 发送通知时",
+    "connection": "实时连接断开或恢复时",
+    "interaction": "点击按钮和链接时",
+    "interactionDesc": "每次按下时发出极轻微的滴答声",
+    "preview": "试听",
+    "throttleInfo": "提示音已限流，活动激增时不会变成连续的提示音。",
+    "disabledInfo": "声音提示已关闭——仪表板将保持完全静音"
+  },
+  "pricing": {
+    "title": "Anthropic Claude 模型定价",
+    "navClaude": "Claude 定价",
+    "navCursor": "Cursor 定价",
+    "navGpt": "Codex 定价",
+    "description": "每百万 Token 的 Anthropic API 费率（美元）。在模式中使用 % 作为通配符。部分模型有限时优惠费率（以紫色显示）；在截止日期当天及之前的用量按该费率计费，之后按标准费率计费。",
+    "introNote": "优惠 ${{input}}/${{output}}，截止 {{until}}",
+    "introRatesTitle": "优惠费率",
+    "introRatesHint": "留空日期表示无优惠",
+    "introUntil": "截止（日期）",
+    "introUntilInvalid": "优惠截止日期必须为 YYYY-MM-DD 格式",
+    "resetConfirm": "确认重置",
+    "resetDefaults": "恢复默认",
+    "resetResult": "已重置为 {{count}} 条默认规则",
+    "addModel": "添加模型",
+    "pattern": "模式",
+    "patternPlaceholder": "claude-opus-4%",
+    "namePlaceholder": "Claude Opus 4",
+    "validationRequired": "模式和显示名称为必填项",
+    "lastUpdated": "最后更新：",
+    "tooltip": {
+      "title": "模型定价的工作原理",
+      "howItWorks": "工作原理",
+      "howItWorksBody": "当一个会话上报使用量时，仪表盘会查找第一个模式与 model id 匹配的定价规则，将（输入 token / 100 万）和（输出 token / 100 万）分别乘以下方的费率以计算费用。规则按从上到下的顺序匹配--首条匹配的规则生效。",
+      "patternsTitle": "模式语法",
+      "patternsBody": "模式采用 SQL 风格的通配。% 可匹配任意字符。例如：claude-opus-4-7% 匹配以 claude-opus-4-7 开头的所有 model id（如 claude-opus-4-7、claude-opus-4-7-20260101）。claude-%-haiku 匹配任意 haiku 变体。像 claude-sonnet-4-6 这样的精确 id 只匹配自身。",
+      "manualUpdates": "你必须手动更新价格",
+      "manualUpdatesBody": "Anthropic 在其官网公布价格变动--并没有实时数据源。当新模型发布或费率调整时，请编辑对应的规则（或在通用规则之上添加新规则），以便后续记录的会话能正确计费。已经存储的会话仍保留入库时使用的价格。",
+      "apiPricing": "仅供参考 - API 价格",
+      "apiPricingBody": "这些是按量付费的 API 价格。如果你通过订阅套餐（Pro、Max、Team 或 Enterprise）使用 Claude Code，你的实际花费是固定的月费，而非按 Token 计费--因此这里的数字通常会高于你实际支付的金额。请将此处的费用视为用量估算，仅供参考，并非账单。"
+    },
+    "cacheWrite5m": "缓存写入 (5m)",
+    "cacheWrite1h": "缓存写入 (1h)",
+    "fastInput": "快速输入",
+    "fastOutput": "快速输出",
+    "cursor": {
+      "title": "Cursor 模型定价",
+      "description": "Cursor 官方公布的原生及第三方路由模型价格。单位为美元/百万 Token，优先匹配最具体的规则。",
+      "source": "查看 Cursor 模型与定价 ↗",
+      "planNote": "估算基于 Cursor 的按 Token 价目表。套餐内用量池、额度、Auto 路由和团队 Token 计费可能使实际订阅费用不同。",
+      "name": "名称",
+      "input": "输入",
+      "write": "缓存写入",
+      "cached": "缓存读取",
+      "output": "输出",
+      "deleteConfirm": "删除此 Cursor 定价规则？",
+      "tooltip": {
+        "title": "Cursor 定价方式",
+        "howItWorks": "工作方式",
+        "howItWorksBody": "Cursor 会话用量仅按此 Cursor 价目表计算。输入、缓存写入、缓存读取和输出 Token 分别按美元/百万 Token 计价。",
+        "patternsTitle": "模式语法",
+        "patternsBody": "模式使用 SQL 风格的 % 通配符。更具体的模式优先，因此快速版或特定版本模型可安全覆盖更宽泛的系列规则。",
+        "manualUpdates": "价格需手动更新",
+        "manualUpdatesBody": "Cursor 在官网发布模型价格变更，但没有实时数据源。当模型名称或价格变化时，请新增或编辑规则。",
+        "apiPricing": "套餐账单可能不同",
+        "apiPricingBody": "价目表用于估算 Token 价值。仪表板不会还原月度包含用量、额外用量、Auto 路由或团队与企业计费规则。"
+      }
+    },
+    "gpt": {
+      "title": "OpenAI GPT 模型定价",
+      "description": "用于 Codex 的公开 OpenAI API 费率。标准请求在输入令牌不超过 272K 时使用短上下文费率，超过 272K 时使用长上下文费率；快速模式分别提供短上下文和长上下文费率。每 100 万 Token（美元）。",
+      "tooltip": {
+        "title": "GPT 定价的工作原理",
+        "howItWorks": "工作原理",
+        "howItWorksBody": "所有金额均为每 100 万 Token 的美元。Codex 标准请求在输入 Token 不超过 272K 时使用短上下文费率，超过 272K 时使用长上下文费率。快速模式分别提供短上下文和长上下文费率。新输入、缓存输入、缓存写入和输出分别计价。",
+        "patternsTitle": "模式语法",
+        "patternsBody": "模式使用 SQL 风格的 % 通配符。仪表盘会先评估最具体的模型模式，并使用第一个与上报 model id 匹配的规则。",
+        "manualUpdates": "价格必须手动更新",
+        "manualUpdatesBody": "OpenAI 会在官网公布 API 价格变动，但没有实时数据源。当模型或费率变化时，请更新或添加匹配规则，以便新记录的用量能正确计价。",
+        "apiPricing": "未公布的费率保持未定价",
+        "apiPricingBody": "破折号表示 OpenAI 未公布该上下文或快速模式费率。匹配用量会被标记为未定价，而不是进行估算。这些是按量付费 API 费率，仅供参考，不代表订阅套餐账单。"
+      },
+      "name": "名称",
+      "short": "标准 · 短上下文 ≤272K",
+      "long": "标准 · 长上下文 >272K",
+      "fast": "快速 · 短上下文 ≤272K",
+      "fastLong": "快速 · 长上下文 >272K",
+      "input": "输入",
+      "cached": "缓存输入",
+      "write": "缓存写入",
+      "output": "输出",
+      "deleteConfirm": "删除此 GPT 定价规则？"
+    }
+  },
+  "claudeHome": {
+    "title": "Claude Code 主目录",
+    "description": "Claude Code transcript、导入和配置的根目录。修改后，后续文件读取会立即使用新位置。",
+    "save": "保存",
+    "saving": "保存中...",
+    "current": "当前：",
+    "placeholder": "/path/to/claude-home",
+    "saveFailed": "更新 CLAUDE_HOME 失败"
+  },
+  "codexHome": {
+    "title": "Codex 主目录",
+    "description": "Codex rollout 会话和 Hook 的根目录。保存新位置会重新启用实时监控并立即扫描其会话。",
+    "save": "保存",
+    "saving": "保存中...",
+    "current": "当前：",
+    "placeholder": "/path/to/codex-home",
+    "saveFailed": "更新 Codex 主目录失败"
+  },
+  "homes": {
+    "title": "会话数据位置",
+    "description": "配置仪表盘读取的本地 Claude Code 和 Codex 目录。每个保存的位置无需重启应用即可生效。"
+  },
+  "display": {
+    "title": "仪表盘数据",
+    "description": "选择要在整个应用中显示哪个产品的会话、Token、费用和活动。更改会立即生效，并与机器数据源筛选保持独立。",
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "both": "两者",
+    "claudeDescription": "显示 Claude Code 和 Cursor 数据。",
+    "codexDescription": "仅显示 Codex 数据。",
+    "bothDescription": "合并 Claude Code、Cursor 和 Codex 数据。",
+    "beta": "测试版"
+  },
+  "hooks": {
+    "title": "钩子配置",
+    "description": "Claude Code 和 Codex 钩子将事件实时转发到仪表盘。",
+    "allInstalled": "所有钩子已安装",
+    "someInstalled": "钩子已配置",
+    "incomplete": "钩子不完整",
+    "reinstall": "重新安装钩子",
+    "configure": "配置钩子",
+    "success": "钩子安装成功",
+    "failed": "钩子安装失败",
+    "display": {
+      "title": "仪表盘数据",
+      "description": "立即按产品筛选所有仪表盘视图。机器数据源筛选保持独立。",
+      "both": "两者"
+    },
+    "modal": {
+      "title": "安装仪表盘钩子",
+      "description": "选择一个或两个产品。现有仪表盘钩子条目将更新；无关的钩子命令不会被更改。",
+      "claude": "来自 ~/.claude/settings.json 的生命周期钩子。",
+      "codex": "来自 ~/.codex/hooks.json 的生命周期钩子，并以 rollout JSONL 作为实时后备。",
+      "installed": "已安装",
+      "overrideWarning": "已找到一个或多个所选产品的现有 Hook 配置。继续只会替换此仪表盘匹配的条目，并保留无关 Hook。",
+      "preserveNote": "必须至少选择一个产品。",
+      "install": "安装所选钩子",
+      "failed": "无法安装所选钩子。"
+    }
+  },
+  "notifications": {
+    "title": "通知",
+    "description": "重要事件的浏览器通知。需要授权。",
+    "enable": "启用浏览器通知",
+    "granted": "已授权",
+    "blocked": "已阻止",
+    "required": "需要授权",
+    "notifyWhen": "通知我当...",
+    "newSession": "新会话开始",
+    "sessionComplete": "会话完成",
+    "sessionError": "会话出错",
+    "subagentSpawned": "Subagent生成",
+    "testTitle": "Agent 监控",
+    "testBody": "通知功能正常！",
+    "sendTest": "发送测试通知",
+    "disabledInfo": "通知已禁用 - 启用以获取会话事件提醒"
+  },
+  "import": {
+    "title": "导入历史",
+    "providerLabel": "导入提供方",
+    "providerHint": "选择要带入此仪表板的本地代理历史记录。",
+    "providerClaude": "Claude Code",
+    "providerCodex": "Codex",
+    "backupProviderNote": "仪表板导出可同时包含 Claude Code 和 Codex 数据。恢复会合并导出中包含的所有提供方数据。",
+    "description": "将已有的 Claude Code 会话导入仪表盘。Token 数、按模型计费、上下文压缩、Subagent、工具调用与各轮耗时都会从原始 JSONL transcript 重新构建--与实时会话的采集方式完全一致。",
+    "scopeNote": "本次导入仅处理 Claude Code 转录记录。它不会更改你的 Codex 历史记录或任一 CLI 配置。",
+    "accuracyNote": "重复导入是安全的。会话按 session ID 去重，压缩基线确保 Token 总数不会重复计算。",
+    "supportedFiles": "支持的输入：.jsonl, .meta.json, .zip, .tar, .tar.gz, .tgz, .gz",
+    "instructions": "如何收集你的历史",
+    "stepLocate": "1. 找到你的 Claude Code 历史",
+    "stepLocateBody": "每个 Claude Code 会话都以 JSONL transcript 的形式保存在 projects 文件夹下。每个子目录以会话启动时的工作目录命名（斜杠替换为短横线）。",
+    "stepArchive": "2. 打包以便迁移（可选）",
+    "stepArchiveBody": "若需从其他机器迁移历史，请先压缩整个文件夹，再通过任意方式（AirDrop、scp、U 盘、云存储）拷贝过来：",
+    "stepChoose": "3. 在下方选择导入模式",
+    "stepChooseBody": "重新扫描默认位置、指向你提取历史所在的任意文件夹，或直接上传文件 / 归档。",
+    "stepVerify": "4. 校验 Token 与费用",
+    "stepVerifyBody": "导入完成后打开 Analytics → Cost 核对明细。同一会话再次导入始终安全。",
+    "defaultLocation": "本机默认位置",
+    "locationFound": "已找到文件夹",
+    "locationMissing": "未找到文件夹",
+    "projectsLabel": "项目",
+    "jsonlLabel": "个 JSONL 文件",
+    "modeRescan": "重新扫描默认文件夹",
+    "modeRescanDesc": "重新读取 ~/.claude/projects 并导入新增内容。",
+    "modeFolder": "扫描文件夹",
+    "modeFolderDesc": "扫描本机任意目录中的 JSONL transcript（递归子目录）。",
+    "modeUpload": "上传文件",
+    "modeUploadDesc": "将 JSONL 文件或归档（.zip / .tar.gz）直接拖拽到浏览器中。",
+    "modeBackup": "恢复备份",
+    "modeBackupDesc": "导入仪表盘导出文件（.json）——合并另一台机器的历史记录。",
+    "backupHint": "将导出的 .json 拖到此处或点击选择",
+    "backupSub": "由“导出数据”按钮（设置页顶部）生成的文件",
+    "runRestore": "恢复",
+    "backupResult": {
+      "title": "恢复完成",
+      "sessionsImported": "新增会话：{{count}}",
+      "sessionsSkipped": "已存在：{{count}}",
+      "events": "事件：{{count}}",
+      "pricing": "定价规则：{{count}}",
+      "detail": "{{agents}} 个代理 · {{workflows}} 个工作流 · {{runs}} 次运行 · {{rules}} 条告警规则"
+    },
+    "folderPlaceholder": "/绝对路径/到/claude-history",
+    "folderHelper": "绝对路径。会展开 ~。子目录会被递归扫描。",
+    "runRescan": "立即重新扫描",
+    "runScan": "扫描文件夹",
+    "runUpload": "上传并导入",
+    "dropzoneHint": "拖拽文件到这里，或点击选择",
+    "dropzoneSub": "支持 .jsonl, .meta.json, .zip, .tar, .tar.gz, .tgz, .gz",
+    "filesSelected": "已选择 {{count}} 个文件",
+    "clearSelection": "清空",
+    "copy": "复制",
+    "copied": "已复制",
+    "progress": {
+      "scan": "正在扫描目录...",
+      "extract": "正在解压（{{processed}}/{{total}}）...",
+      "parse": "正在解析 transcript（{{processed}}/{{total}}）...",
+      "complete": "导入完成",
+      "error": "导入失败"
+    },
+    "result": {
+      "imported": "已导入：{{count}}",
+      "backfilled": "已补全已有会话：{{count}}",
+      "skipped": "已是最新：{{count}}",
+      "errors": "错误：{{count}}",
+      "filesScanned": "已扫描文件数：{{count}}",
+      "title": "上次导入结果"
+    },
+    "errors": {
+      "noFiles": "未选择任何文件",
+      "noJsonl": "上传内容中未找到 .jsonl 文件",
+      "pathRequired": "请填写路径",
+      "pathInvalid": "路径必须为绝对路径",
+      "pathNotFound": "路径不存在",
+      "pathNotDir": "路径不是目录",
+      "generic": "导入失败：{{message}}"
+    },
+    "codex": {
+      "description": "将现有 Codex 会话导入仪表板。用户消息、助手输出、令牌快照、工具调用以及活动/等待生命周期状态都会通过与实时监控相同的管道从原始 rollout JSONL 文件中重建。",
+      "scopeNote": "本次导入仅处理 {{provider}} 转录记录。它不会更改你的 Claude Code 历史记录或 Codex CLI 配置。",
+      "accuracyNote": "重复运行是安全的。已导入 rollout 的游标会被保留，因此已统计的令牌增量和工具调用绝不会重复累加。",
+      "stepLocate": "1. 找到 Codex rollout 历史记录",
+      "stepLocateBody": "Codex 会将每个会话存为 sessions 文件夹下只能追加的 rollout JSONL 文件。嵌套的日期文件夹会被自动扫描。",
+      "stepArchive": "2. 打包以便传输（可选）",
+      "stepArchiveBody": "若要从另一台机器转移历史记录，请先归档 sessions 文件夹，然后复制过来（AirDrop、scp、USB 或云存储）。如果希望保留该机器上的原生 /rename 标题，也请包含 session_index.jsonl。",
+      "stepChoose": "3. 在下方选择导入方式",
+      "stepChooseBody": "重新扫描本机的 Codex 会话，指定一个复制或解压后的文件夹，或直接上传 rollout 文件和归档文件。",
+      "stepVerify": "4. 验证令牌和成本",
+      "stepVerifyBody": "导入后，打开分析 → 成本确认明细。同一个 rollout 始终可以安全地再次导入。",
+      "defaultLocation": "此机器上的默认 Codex 会话位置",
+      "locationFound": "已找到会话文件夹",
+      "locationMissing": "未找到会话文件夹",
+      "projectsLabel": "会话文件夹",
+      "jsonlLabel": "rollout 文件",
+      "modeRescan": "重新扫描 Codex 会话",
+      "modeRescanDesc": "重新读取 ~/.codex/sessions，并导入尚未出现在仪表板中的 rollout 历史记录。",
+      "modeFolder": "扫描 Codex 文件夹",
+      "modeFolderDesc": "扫描复制或解压后的 Codex 目录以查找 rollout JSONL 文件，包括嵌套的日期文件夹。",
+      "modeUpload": "上传 Codex 历史记录",
+      "modeUploadDesc": "将 rollout JSONL 文件或归档文件（.zip / .tar.gz）直接拖放到浏览器中。",
+      "folderPlaceholder": "/absolute/path/to/codex-history",
+      "folderHelper": "绝对路径。波浪号（~）会被展开。将递归扫描该文件夹及所有嵌套日期文件夹以查找 Codex rollout 文件。",
+      "runRescan": "立即重新扫描 Codex",
+      "runScan": "扫描 Codex 文件夹",
+      "runUpload": "上传并导入 Codex",
+      "dropzoneHint": "将 Codex rollout 文件拖到这里，或点击选择",
+      "dropzoneSub": "支持 rollout .jsonl、session_index.jsonl 以及 .zip、.tar、.tar.gz、.tgz、.gz 归档文件"
+    }
+  },
+  "data": {
+    "title": "数据管理",
+    "description": "数据库信息、导入/导出和清理。",
+    "dbOverview": "数据库概览",
+    "dbSize": "数据库大小",
+    "loadingDb": "正在加载数据库信息...",
+    "sessionCleanup": "会话清理",
+    "cleanupDesc": "废弃过期会话并清除旧数据",
+    "abandonAfter": "废弃超过以下时间的活跃会话",
+    "purgeAfter": "清除超过以下时间的已完成/错误会话",
+    "confirmCleanup": "确认清理",
+    "runCleanup": "执行清理",
+    "nothingToClean": "无需清理",
+    "abandonedResult": " 个会话已废弃",
+    "purgedResult": " 个会话已清除（{{events}} 个事件，{{agents}} 个Agent）",
+    "purgedSnapshots": "已删除 {{size}} 的对话记录快照"
+  },
+  "snapshots": {
+    "title": "对话记录快照",
+    "description": "持久保存的副本，在 Claude Code、Codex 和 Cursor 删除自身的对话记录后，仍可查看对话内容。",
+    "loading": "正在加载快照存储信息...",
+    "total": "总计",
+    "files_one": "{{formatted}} 个文件",
+    "files_other": "{{formatted}} 个文件",
+    "compressedShare": "{{total}} 个文件中已压缩 {{compressed}} 个",
+    "policy": "压缩：{{compression}} · 保留期限：{{age}} · 容量上限：{{size}}（通过 DASHBOARD_SNAPSHOT_* 环境变量设置）",
+    "on": "开启",
+    "off": "关闭",
+    "unlimited": "无",
+    "days_one": "{{count}} 天",
+    "days_other": "{{count}} 天",
+    "compressNow": "立即压缩",
+    "compressHint": "无损：仅压缩原始文件已不存在的快照，并在删除未压缩副本前进行校验。",
+    "compressNone": "没有可压缩的内容。所有快照的原始文件仍在磁盘上，或最近仍有活动。",
+    "compressResult_one": "已压缩 {{count}} 个快照（{{before}} → {{after}}）",
+    "compressResult_other": "已压缩 {{count}} 个快照（{{before}} → {{after}}）",
+    "compressFailed_one": "{{count}} 个快照无法压缩，已保持原样。",
+    "compressFailed_other": "{{count}} 个快照无法压缩，已保持原样。",
+    "compressSkipped": "已跳过 {{providers}}：源目录缺失或不可读，因此其中的内容不会被视为已删除。",
+    "pruneTitle": "清理旧快照",
+    "pruneDesc": "按会话整体删除已结束会话的快照，从最旧的开始。请先预览：被清理的快照可能是某段对话仅存的副本。",
+    "olderThan": "早于",
+    "keepUnder": "总容量保持在以下",
+    "includeOrphans": "同时删除数据库中已不存在的会话的快照",
+    "preview": "预览",
+    "previewFirst": "请先用这些设置预览",
+    "prune": "清理",
+    "confirmPrune": "确认清理",
+    "previewNone": "没有匹配项，不会删除任何快照。",
+    "previewResult_one": "将删除 {{count}} 个会话（{{files}} 个文件，{{size}}）；剩余 {{remaining}}。",
+    "previewResult_other": "将删除 {{count}} 个会话（{{files}} 个文件，{{size}}）；剩余 {{remaining}}。",
+    "overCap": "仍超出容量上限 {{size}}。活跃会话和最近 24 小时内有活动的会话永远不会被清理。",
+    "pruneWarning": "此操作将永久删除这些快照。原始文件已被删除的会话将丢失其对话内容。",
+    "pruneResult_one": "已清理 {{count}} 个会话的快照（{{size}}）",
+    "pruneResult_other": "已清理 {{count}} 个会话的快照（{{size}}）"
+  },
+  "danger": {
+    "title": "危险操作",
+    "description": "不可逆操作，将永久删除数据",
+    "warning": "这将删除所有会话、Agent、事件和 Token 数据。确定要继续吗？",
+    "yesClearAll": "是的，清除所有数据",
+    "clearAllData": "清除所有数据",
+    "clearedResult": "已清除 {{count}} 行"
+  },
+  "about": {
+    "title": "关于",
+    "description": "服务器运行时信息。",
+    "release": "版本",
+    "uiBuild": "UI 构建 v{{version}}（请重新构建客户端以匹配）",
+    "uptime": "运行时间",
+    "nodejs": "Node.js",
+    "platform": "平台",
+    "wsClients": "WebSocket 客户端",
+    "loadingInfo": "正在加载服务器信息..."
+  },
+  "tables": {
+    "sessions": "个会话",
+    "agents": "个Agent",
+    "events": "个事件",
+    "sessionsWithCost": "个有费用的会话",
+    "pricingRules": "条定价规则",
+    "cursorPricingRules": "条 Cursor 定价规则"
+  },
+  "messages": {
+    "failedLoad": "加载失败",
+    "failedSave": "保存失败",
+    "failedDelete": "删除失败",
+    "unknownError": "未知错误",
+    "actionFailed": "错误：{{message}}"
+  },
+  "webhooks": {
+    "title": "Webhook 通知",
+    "description": "将触发的告警转发到 Slack、Discord、Microsoft Teams 或任意 HTTP 端点。投递自动进行，失败会重试，且绝不阻塞监控。",
+    "count_one": "{{count}} 个目标",
+    "count_other": "{{count}} 个目标",
+    "add": "添加 Webhook",
+    "loading": "正在加载 Webhook…",
+    "empty": "尚未配置 Webhook。添加一个，将告警转发到 Slack、Discord、Teams 或自定义端点。",
+    "scopedTo_one": "{{count}} 条规则",
+    "scopedTo_other": "{{count}} 条规则",
+    "enabled": "已启用",
+    "test": "测试",
+    "edit": "编辑",
+    "delete": "删除",
+    "confirmDelete": "确认",
+    "testOk": "已投递（HTTP {{status}}）",
+    "testFail": "失败：{{error}}",
+    "addTitle": "新建 Webhook",
+    "editTitle": "编辑 Webhook",
+    "fieldName": "名称",
+    "fieldNamePlaceholder": "例如：团队 Slack #alerts",
+    "fieldType": "类型",
+    "type": {
+      "slack": "Slack",
+      "discord": "Discord",
+      "teams": "Microsoft Teams",
+      "generic": "通用（自定义 JSON）"
+    },
+    "fieldUrl": "Webhook 地址",
+    "urlKeepHint": "留空则保持不变",
+    "urlKeepPlaceholder": "••••••••（保持不变）",
+    "urlPlaceholder": {
+      "slack": "https://hooks.slack.com/services/…",
+      "discord": "https://discord.com/api/webhooks/…",
+      "teams": "https://outlook.office.com/webhook/…",
+      "generic": "https://example.com/webhook"
+    },
+    "fieldSecret": "签名密钥（可选）",
+    "secretPlaceholder": "HMAC-SHA256 密钥",
+    "secretKeepPlaceholder": "••••••••（留空则保持不变）",
+    "secretHint": "设置后，请求会附带 X-Webhook-Signature 头进行签名。",
+    "fieldHeaders": "自定义请求头（可选）",
+    "replaceHeaders": "替换请求头",
+    "headerKey": "请求头",
+    "headerValue": "值",
+    "addHeader": "添加请求头",
+    "scopeAll": "接收所有规则的告警",
+    "enabledOnSave": "启用",
+    "save": "保存",
+    "create": "创建",
+    "cancel": "取消",
+    "urlOptional": "可选覆盖",
+    "urlAuto": "URL 将根据下方凭据自动设置。",
+    "deleteTitle": "删除 Webhook？",
+    "deleteMessage": "删除“{{name}}”？触发的告警将不再投递到此目标。此操作无法撤销。",
+    "guideToggle": "如何设置 {{provider}}",
+    "guideDocs": "{{provider}} 官方文档",
+    "guideStaleNote": "各服务的设置界面经常变动，这些步骤可能已过时--请务必以官方文档为准。"
+  },
+  "alertsHub": {
+    "title": "告警",
+    "description": "在一个地方定义告警规则、将其路由到 Webhook 渠道，并查看已触发的告警。",
+    "tabRules": "规则",
+    "tabChannels": "渠道",
+    "tabActivity": "动态",
+    "rulesHint": "触发告警的条件。在服务端针对实时事件流进行评估。",
+    "rulesEmptyHint": "添加规则，开始对错误、闲置、卡住的代理或令牌阈值进行告警。"
+  },
+  "jumpTo": "跳转到",
+  "webhookGuides": {
+    "slack": {
+      "steps": [
+        "在 api.slack.com/apps 创建或打开一个 Slack 应用。",
+        "开启“Incoming Webhooks”，然后点击“Add New Webhook to Workspace”。",
+        "选择要发布到的频道并授权。",
+        "复制生成的 URL（https://hooks.slack.com/services/…）并粘贴到上方。"
+      ]
+    },
+    "discord": {
+      "steps": [
+        "打开服务器 → 服务器设置 → 整合 → Webhook。",
+        "点击“新建 Webhook”，选择频道，可重命名。",
+        "点击“复制 Webhook URL”并粘贴到上方。"
+      ]
+    },
+    "teams": {
+      "steps": [
+        "在目标 Teams 频道，点击 ⋯ → “Workflows”。",
+        "选择模板“Post to a channel when a webhook request is received”。",
+        "完成流程并复制生成的 HTTP POST URL。",
+        "粘贴到上方。（传统 Office 365 连接器已于 2025 年停用 - 请使用 Workflows。）"
+      ]
+    },
+    "google_chat": {
+      "steps": [
+        "打开 Google Chat 空间 → 空间标题 → “应用和集成”。",
+        "点击“Webhook”→“添加 Webhook”并命名。",
+        "复制 Webhook URL 并粘贴到上方。"
+      ]
+    },
+    "mattermost": {
+      "steps": [
+        "主菜单 → 集成 → 传入 Webhook（管理员需先启用 Webhook）。",
+        "点击“添加传入 Webhook”并选择频道。",
+        "保存后复制 Webhook URL 并粘贴到上方。"
+      ]
+    },
+    "rocketchat": {
+      "steps": [
+        "管理 → 集成 → 新建 → 传入。",
+        "启用它，选择频道并保存。",
+        "复制“Webhook URL”并粘贴到上方。"
+      ]
+    },
+    "telegram": {
+      "steps": [
+        "给 @BotFather 发消息，运行 /newbot，复制 bot token。",
+        "将该 bot 加入你的群/频道（或直接私聊它）。",
+        "获取 chat ID：发送一条消息，打开 https://api.telegram.org/bot<token>/getUpdates，读取 result[].message.chat.id。",
+        "在上方填入 Bot token 和 Chat ID - 无需 URL。"
+      ]
+    },
+    "pagerduty": {
+      "steps": [
+        "打开目标服务 → 集成 → “Add integration”。",
+        "选择“Events API v2”。",
+        "复制 Integration Key（即 routing key）。",
+        "在上方填入 Routing key - Events API URL 已自动填好。"
+      ]
+    },
+    "opsgenie": {
+      "steps": [
+        "设置 → 集成 → 添加“API”集成。",
+        "复制生成的 API key。",
+        "记下你的账户区域（US 或 EU）。",
+        "在上方填入 API key 和区域 - 告警 URL 会根据区域自动推导。"
+      ]
+    },
+    "splunk_oncall": {
+      "steps": [
+        "集成 → REST Endpoint，并启用它。",
+        "复制 REST URL - 其中已包含你的 API key。",
+        "将末尾的“$routing_key”替换为你的某个 routing key。",
+        "将完整 URL 粘贴到上方。"
+      ]
+    },
+    "zapier": {
+      "steps": [
+        "创建一个 Zap，触发器选择“Webhooks by Zapier”→“Catch Hook”。",
+        "复制它提供的自定义 Webhook URL。",
+        "粘贴到上方。告警以 JSON 形式到达：{ event, alert }。"
+      ]
+    },
+    "make": {
+      "steps": [
+        "在场景的第一步添加“Webhooks”→“Custom webhook”模块。",
+        "点击“Add”，创建该 hook 并复制其 URL。",
+        "粘贴到上方，然后运行一次让 Make 学习负载结构。"
+      ]
+    },
+    "n8n": {
+      "steps": [
+        "在工作流中添加“Webhook”节点；将方法设为 POST。",
+        "复制 Production URL。",
+        "激活工作流并将 URL 粘贴到上方（自托管允许 http）。"
+      ]
+    },
+    "pipedream": {
+      "steps": [
+        "创建一个带“HTTP / Webhook”触发器的工作流。",
+        "复制唯一的端点 URL。",
+        "粘贴到上方；在 Pipedream 事件检查器中查看投递。"
+      ]
+    },
+    "generic": {
+      "steps": [
+        "指向任何接受 JSON POST 的端点（https，本地测试可用 http）。",
+        "负载结构：{ event: 'alert.triggered', source, sent_at, alert: { … } }。",
+        "可选：设置签名密钥（对负载做 HMAC-SHA256 → X-Webhook-Signature 头）和自定义请求头。",
+        "提示：用 webhook.site 等免费工具查看确切负载。"
+      ]
+    }
+  },
+  "remoteSources": {
+    "title": "远程数据源",
+    "description": "通过 SSH 从其他机器收集 Claude Code 和 Codex 使用数据 - 例如你通过 SSH 操控的开发机或云虚拟机，同时在本地运行此仪表板。身份验证使用你自己的 SSH 配置（~/.ssh/config、密钥、agent）；此处不存储任何密码。",
+    "scopeTitle": "数据范围",
+    "scopeDesc": "选择整个仪表板显示哪些机器的数据。更改会立即应用到每个页面 — 会话、分析和成本。",
+    "scopeAll": "所有数据源",
+    "scopeAllDesc": "本机加上所有已配置的远程数据源，合并显示。",
+    "scopeLocal": "仅本机",
+    "scopeLocalDesc": "仅本地收集的会话 — 隐藏所有远程数据源的数据。",
+    "scopeSelected": "选定的数据源",
+    "scopeSelectedDesc": "在下方精确选择要包含的机器。",
+    "scopeSelectedCount": "已选 {{n}} / {{total}}",
+    "scopePickMachines": "要包含的机器",
+    "thisMachine": "本机",
+    "listTitle": "已配置的数据源",
+    "add": "添加数据源",
+    "addTitle": "添加远程数据源",
+    "editTitle": "编辑数据源",
+    "fieldLabel": "标签",
+    "fieldHost": "SSH 主机",
+    "fieldPort": "端口（可选）",
+    "fieldIdentity": "身份文件（可选）",
+    "fieldRemoteHome": "远程 Claude 主目录（可选）",
+    "fieldRemoteHomeHint": "Linux/macOS：默认 ~/.claude（或绝对路径，如 /home/you/.claude）。通过 Windows SSH 且 Claude 在 WSL 中：留空（自动检测）或使用 wsl:~/.claude。原生 Windows：C:/Users/you/.claude。",
+    "fieldRemoteCodexHome": "远程 Codex 主目录（可选）",
+    "fieldRemoteCodexHomeHint": "默认使用 ~/.codex，并导入其会话及原生重命名标题。若通过 Windows SSH 且 Codex 在 WSL 中，留空（自动检测）或使用 wsl:~/.codex。",
+    "fieldEnabled": "在后台自动同步",
+    "empty": "尚无远程数据源。",
+    "emptyHint": "添加一台你通过 SSH 访问的机器，以拉取其 Claude Code 和 Codex 使用数据。",
+    "paused": "自动同步已关闭",
+    "sessionCount": "{{n}} 个会话",
+    "sessionCountLinked": "已关联 {{n}}",
+    "sessionCountHint": "关联到此数据源的会话（数据范围为“全部”时，列表中可能还有其他会话）",
+    "lastSync": "上次同步：{{when}}",
+    "neverSynced": "从未同步",
+    "imported": "已导入 {{n}}",
+    "syncNew": "新增 {{n}}",
+    "syncOnRemote": "远程 {{n}}",
+    "providerClaude": "Claude Code",
+    "providerCodex": "Codex",
+    "providerSessions": "{{n}} 个会话",
+    "providerStatus": {
+      "idle": "未检查",
+      "syncing": "检查中",
+      "ok": "就绪",
+      "unavailable": "未找到",
+      "error": "不可用"
+    },
+    "test": "测试",
+    "syncNow": "同步",
+    "syncAll": "全部同步",
+    "enable": "启用",
+    "disable": "禁用",
+    "confirmDelete": "移除此数据源？",
+    "purgeData": "同时删除从此数据源导入的会话（无法撤销）",
+    "deleteAndPurge": "移除 + 删除数据",
+    "removeKeep": "移除（保留数据）",
+    "remoteSourceBadgeTitle": "从远程机器收集"
+  },
+  "cursorPathsNote": "Cursor 已包含在 Claude Code 仪表板范围内。本地历史会自动从 ~/.cursor 发现并创建快照；仅同步 Claude 的 SSH 导入不会同步远程 Cursor 文件夹。"
+}

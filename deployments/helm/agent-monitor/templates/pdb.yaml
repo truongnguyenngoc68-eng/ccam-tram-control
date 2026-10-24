@@ -1,0 +1,5 @@
+{{/*
+A PodDisruptionBudget with minAvailable: 1 would block voluntary maintenance for
+CCAM's intentional one-pod SQLite topology. Availability comes from durable
+storage, verified backups, and controlled Recreate rollouts instead.
+*/}}

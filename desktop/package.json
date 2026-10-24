@@ -1,0 +1,40 @@
+{
+  "name": "agent-dashboard-desktop",
+  "version": "2.4.3",
+  "private": true,
+  "description": "Native macOS and Windows desktop shell for Claude Code Agent Monitor.",
+  "author": "Son Nguyen <hoangson091104@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/hoangsonww/Claude-Code-Agent-Monitor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hoangsonww/Claude-Code-Agent-Monitor.git"
+  },
+  "main": "out/main.js",
+  "scripts": {
+    "clean": "rm -rf out release",
+    "prebuild": "node scripts/prebuild.js",
+    "build": "npm run prebuild && tsc -p tsconfig.json",
+    "build:icons": "bash scripts/build-icons.sh",
+    "build:win-icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win-icon.ps1",
+    "dev": "npm run build && electron out/main.js",
+    "package": "rm -rf release && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --x64 --publish never",
+    "dmg": "npm run package",
+    "dmg:arm64": "rm -rf release && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --publish never --config.dmg.title='Claude Code Monitor (Apple Silicon)'",
+    "dmg:x64": "rm -rf release && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --x64 --publish never --config.dmg.title='Claude Code Monitor (Intel)'",
+    "dmg:universal": "rm -rf release && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --publish never --config.dmg.title='Claude Code Monitor (Universal)'",
+    "win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "win:portable": "npm run build && electron-builder --win portable --x64 --publish never",
+    "test": "npm run build && node --test --test-reporter=spec tests/smoke.test.mjs",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.5.4"
+  }
+}
